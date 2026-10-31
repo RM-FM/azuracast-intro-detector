@@ -65,7 +65,7 @@ jobs:
 
   build:
     needs: tests
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && (github.event_name != 'push' || github.ref_name == 'develop')
     runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:
@@ -88,7 +88,7 @@ jobs:
       PYTHON_IMAGE: ${{ inputs.base_image || 'python:3.11-slim-bookworm' }}
       OWNER_TYPE: ${{ github.event.repository.owner.type }}
       PUBLISH: ${{ inputs.publish || github.event_name == 'release' }}
-      STAGE_CANDIDATE: ${{ inputs.stage_candidate || (github.event_name == 'push' && github.ref_type == 'branch') || github.event_name == 'release' }}
+      STAGE_CANDIDATE: ${{ inputs.stage_candidate || (github.event_name == 'push' && github.ref_name == 'develop') || github.event_name == 'release' }}
     steps:
       - name: Free runner disk space for a ~20 GB image
         run: |
