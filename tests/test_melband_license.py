@@ -30,6 +30,14 @@ sys.path.insert(0, str(ROOT / 'gpu'))
 SOURCE_BUNDLE_SPEC = importlib.util.spec_from_file_location('build_source_bundle', ROOT / 'gpu/build_source_bundle.py')
 source_bundle = importlib.util.module_from_spec(SOURCE_BUNDLE_SPEC)
 SOURCE_BUNDLE_SPEC.loader.exec_module(source_bundle)
+NATIVE_SOURCE_SPEC = importlib.util.spec_from_file_location(
+    'fetch_native_sources', ROOT / 'gpu/fetch_native_sources.py')
+native_sources = importlib.util.module_from_spec(NATIVE_SOURCE_SPEC)
+NATIVE_SOURCE_SPEC.loader.exec_module(native_sources)
+DEBIAN_FETCH_SPEC = importlib.util.spec_from_file_location(
+    'fetch_debian_sources', ROOT / 'gpu/fetch_debian_sources.py')
+debian_fetch = importlib.util.module_from_spec(DEBIAN_FETCH_SPEC)
+DEBIAN_FETCH_SPEC.loader.exec_module(debian_fetch)
 PREFETCH_SPEC = importlib.util.spec_from_file_location('image_prefetch', ROOT / 'gpu/prefetch.py')
 prefetch = importlib.util.module_from_spec(PREFETCH_SPEC)
 PREFETCH_SPEC.loader.exec_module(prefetch)
@@ -460,6 +468,24 @@ class DebianSourceArchives(unittest.TestCase):
             debian_sources.verify(self.root, self.inventory)
 
 class SourceBundleBuilder(unittest.TestCase):
+    def test_native_source_fetch_allowlist_is_complete_and_pinned(self):
+        names = set(native_sources.DIRECT_SOURCES) | set(native_sources.GIT_ARCHIVES)
+        self.assertEqual(names, set(source_bundle.NATIVE_BUILD_SOURCES))
+        hashes = [record[-1] for record in native_sources.GIT_ARCHIVES.values()]
+        hashes.extend(record[1] for record in native_sources.DIRECT_SOURCES.values())
+        self.assertTrue(all(len(value) == 64 and set(value) <= set('0123456789abcdef') for value in hashes))
+
+    def test_debian_source_fetcher_deduplicates_exact_source_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inventory = Path(directory) / 'debian.tsv'
+            inventory.write_text(
+                'binary\tversion\tsource\tsource_version\n'
+                'first\t1.0\tshared-source\t2.0\n'
+                'second\t1.1\tshared-source\t2.0\n'
+                'third\t3.0\tother-source\t4.0\n')
+            self.assertEqual(debian_fetch.required_sources(inventory),
+                             [('other-source', '4.0'), ('shared-source', '2.0')])
+
     def test_source_obligation_uses_component_license_not_embedded_references(self):
         package = dict(name='nvidia-cuda-cupti-cu12', version='12.1.105',
                        license='NVIDIA Proprietary Software', license_expression=None,
@@ -484,7 +510,8 @@ class SourceBundleBuilder(unittest.TestCase):
         (self.repository / 'docs').mkdir()
         (self.repository / 'docs/NVIDIA_REDISTRIBUTION.md').write_text(
             'REDISTRIBUTION DECISION: APPROVED\n')
-        for name in ('SOURCE_BUILD.md', 'verify_debian_sources.py', 'build_source_bundle.py'):
+        for name in ('SOURCE_BUILD.md', 'verify_debian_sources.py', 'fetch_debian_sources.py',
+                 'fetch_native_sources.py', 'build_source_bundle.py'):
             (self.repository / 'gpu' / name).write_text('neutral build material\n')
         self.context = self.root / 'worker-context.tar'
         with tarfile.open(self.context, 'w') as archive:

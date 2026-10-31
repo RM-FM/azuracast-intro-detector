@@ -155,6 +155,7 @@ def build(inventory, source_material, repository, context, output, image_id, rev
                 shutil.copyfileobj(source, destination)
     add_tree(files, context_root, 'source/repository')
     for relative in ('gpu/SOURCE_BUILD.md', 'gpu/verify_debian_sources.py',
+                     'gpu/fetch_debian_sources.py', 'gpu/fetch_native_sources.py',
                      'gpu/build_source_bundle.py', 'docs/NVIDIA_REDISTRIBUTION.md'):
         add_file(files, f'source/repository/{relative}', repository / relative)
     add_tree(files, inventory, 'image-legal')

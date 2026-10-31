@@ -267,79 +267,92 @@ def verify_source_bundle(archive, directory, image_id, revision):
                                     source_archive=package['source_archive'])
     if not expected:
         raise ValueError('Missing image package inventory')
-    with tarfile.open(archive, 'r:*') as bundle:
-        members = {}
-        for member in bundle.getmembers():
+    file_records = {}
+    manifest_data = None
+    small_file_contents = {}
+    with tarfile.open(archive, 'r|*') as bundle:
+        for member in bundle:
             path = PurePosixPath(member.name)
-            if path.is_absolute() or '..' in path.parts or member.name in members:
+            if path.is_absolute() or '..' in path.parts or member.name in file_records:
                 raise ValueError('Invalid or duplicate source-bundle path')
-            members[member.name] = member
-
-        def read_manifest():
-            member = members.get('source-manifest.json')
-            if member is None or not member.isfile() or member.size > 10 * 1024 * 1024:
-                raise ValueError('Missing or oversized source-manifest.json')
-            with bundle.extractfile(member) as stream:
-                return json.load(stream)
-
-        def verify_file(entry):
-            if not isinstance(entry, dict) or not entry.get('path') or not entry.get('sha256'):
-                raise ValueError('Missing source-bundle file record')
-            member = members.get(entry['path'])
-            if member is None or not member.isfile() or not member.size:
-                raise ValueError(f'Missing source-bundle file: {entry["path"]}')
+            if not member.isfile() or member.size <= 0:
+                raise ValueError(f'Invalid source-bundle file: {member.name}')
             digest = hashlib.sha256()
+            manifest_bytes = bytearray() if member.name == 'source-manifest.json' else None
+            small_file_bytes = bytearray() if member.size <= 64 * 1024 else None
+            if manifest_bytes is not None and member.size > 10 * 1024 * 1024:
+                raise ValueError('Missing or oversized source-manifest.json')
             with bundle.extractfile(member) as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b''):
                     digest.update(chunk)
-            if digest.hexdigest() != entry['sha256']:
-                raise ValueError(f'Source-bundle checksum mismatch: {entry["path"]}')
+                    if manifest_bytes is not None:
+                        manifest_bytes.extend(chunk)
+                    if small_file_bytes is not None:
+                        small_file_bytes.extend(chunk)
+            file_records[member.name] = digest.hexdigest()
+            if manifest_bytes is not None:
+                manifest_data = json.loads(manifest_bytes)
+            if small_file_bytes is not None:
+                small_file_contents[member.name] = bytes(small_file_bytes)
 
-        manifest = read_manifest()
-        if manifest.get('schema') != 1 or manifest.get('image_id') != image_id or manifest.get('revision') != revision:
-            raise ValueError('Source bundle does not match the reviewed image and revision')
-        for entry in manifest.get('additional_sources', []):
+    if manifest_data is None:
+        raise ValueError('Missing or oversized source-manifest.json')
+
+    def verify_file(entry):
+        if not isinstance(entry, dict) or not entry.get('path') or not entry.get('sha256'):
+            raise ValueError('Missing source-bundle file record')
+        actual = file_records.get(entry['path'])
+        if actual is None:
+            raise ValueError(f'Missing source-bundle file: {entry["path"]}')
+        if actual != entry['sha256']:
+            raise ValueError(f'Source-bundle checksum mismatch: {entry["path"]}')
+
+    manifest = manifest_data
+    if manifest.get('schema') != 1 or manifest.get('image_id') != image_id or manifest.get('revision') != revision:
+        raise ValueError('Source bundle does not match the reviewed image and revision')
+    for entry in manifest.get('additional_sources', []):
+        verify_file(entry)
+    model_inventory_path = Path(directory) / 'inventory/models.json'
+    if model_inventory_path.is_file() and manifest.get('model_assets') != json.loads(
+            model_inventory_path.read_text())['assets']:
+        raise ValueError('Source-bundle model assets differ from the image inventory')
+    components = manifest.get('components', [])
+    identifiers = [component['id'] for component in components]
+    if len(set(identifiers)) != len(identifiers) or set(identifiers) != set(expected):
+        raise ValueError('Source-bundle component coverage differs from the image inventory')
+    verify_file(manifest['build_instructions'])
+    for component in components:
+        actual = expected[component['id']]
+        if any(component.get(key) != value for key, value in actual.items()):
+            raise ValueError(f'Source-bundle version or native-library mismatch: {component["id"]}')
+        license_name = component.get('license', '')
+        if not license_name or not component.get('origin', '').startswith('https://'):
+            raise ValueError(f'Missing component license or origin: {component["id"]}')
+        files = component.get('files', [])
+        if component.get('source_required') not in (True, False):
+            raise ValueError(f'Missing source obligation review: {component["id"]}')
+        if component['source_required'] or 'GPL' in license_name.upper():
+            if not files:
+                raise ValueError(f'Missing corresponding source: {component["id"]}')
+        elif not component.get('source_not_required_reason'):
+            raise ValueError(f'Missing source obligation rationale: {component["id"]}')
+        for entry in files:
             verify_file(entry)
-        model_inventory_path = Path(directory) / 'inventory/models.json'
-        if model_inventory_path.is_file() and manifest.get('model_assets') != json.loads(
-                model_inventory_path.read_text())['assets']:
-            raise ValueError('Source-bundle model assets differ from the image inventory')
-        components = manifest.get('components', [])
-        identifiers = [component['id'] for component in components]
-        if len(set(identifiers)) != len(identifiers) or set(identifiers) != set(expected):
-            raise ValueError('Source-bundle component coverage differs from the image inventory')
-        verify_file(manifest['build_instructions'])
-        for component in components:
-            actual = expected[component['id']]
-            if any(component.get(key) != value for key, value in actual.items()):
-                raise ValueError(f'Source-bundle version or native-library mismatch: {component["id"]}')
-            license_name = component.get('license', '')
-            if not license_name or not component.get('origin', '').startswith('https://'):
-                raise ValueError(f'Missing component license or origin: {component["id"]}')
-            files = component.get('files', [])
-            if component.get('source_required') not in (True, False):
-                raise ValueError(f'Missing source obligation review: {component["id"]}')
-            if component['source_required'] or 'GPL' in license_name.upper():
-                if not files:
-                    raise ValueError(f'Missing corresponding source: {component["id"]}')
-            elif not component.get('source_not_required_reason'):
-                raise ValueError(f'Missing source obligation rationale: {component["id"]}')
-            for entry in files:
-                verify_file(entry)
-            if actual.get('source_archive') and not any(
-                    entry['sha256'] == actual['source_archive']['sha256'] for entry in files):
-                raise ValueError(f'Missing exact native source archive: {component["id"]}')
-            if 'LGPL' in license_name.upper():
-                verify_file(component.get('replacement_instructions'))
-            if '/nvidia-' in component['id'].lower() or 'NVIDIA' in license_name.upper():
-                basis = component.get('redistribution_basis')
-                verify_file(basis)
-                member = members[basis['path']]
-                with bundle.extractfile(member) as stream:
-                    decisions = [line.strip() for line in stream.read().decode().splitlines()
-                                 if line.startswith('REDISTRIBUTION DECISION:')]
-                if decisions != ['REDISTRIBUTION DECISION: APPROVED']:
-                    raise ValueError(f'NVIDIA redistribution review is not approved: {component["id"]}')
+        if actual.get('source_archive') and not any(
+                entry['sha256'] == actual['source_archive']['sha256'] for entry in files):
+            raise ValueError(f'Missing exact native source archive: {component["id"]}')
+        if 'LGPL' in license_name.upper():
+            verify_file(component.get('replacement_instructions'))
+        if '/nvidia-' in component['id'].lower() or 'NVIDIA' in license_name.upper():
+            basis = component.get('redistribution_basis')
+            verify_file(basis)
+            basis_contents = small_file_contents.get(basis['path'])
+            if basis_contents is None:
+                raise ValueError(f'Missing NVIDIA redistribution review: {component["id"]}')
+            decisions = [line.strip() for line in basis_contents.decode().splitlines()
+                         if line.startswith('REDISTRIBUTION DECISION:')]
+            if decisions != ['REDISTRIBUTION DECISION: APPROVED']:
+                raise ValueError(f'NVIDIA redistribution review is not approved: {component["id"]}')
     return manifest
 
 
