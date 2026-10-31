@@ -30,6 +30,23 @@ retrieved from the pinned Debian snapshot configured in `gpu/Dockerfile`.
 Use `dpkg-source -x PACKAGE.dsc` to unpack it; build with Debian's documented
 `dpkg-buildpackage` workflow and the package's declared build dependencies.
 
+`gpu/fetch_debian_sources.py` downloads the exact source/version pairs from the
+image inventory. It uses the Dockerfile's pinned snapshot and falls back to the
+matching snapshot pool descriptor when a base-image source is absent from the APT
+source index. `gpu/fetch_native_sources.py` downloads the hash-locked PyPI and
+upstream archives and recreates the pinned Git archives.
+
+```bash
+python3 gpu/fetch_native_sources.py --output source-material/native
+python3 gpu/fetch_debian_sources.py \
+	--inventory image-legal/inventory/base/debian.tsv \
+	--output source-material/debian --snapshot 20261030T000000Z
+python3 gpu/build_source_bundle.py \
+	--inventory image-legal --source-material source-material \
+	--repository . --worker-context worker-context.tar \
+	--image-id sha256:... --revision COMMIT --output corresponding-source.tar.gz
+```
+
 GNU and audio-library runtime replacements use the installed Debian binaries in
 all three Python environments. Exact source package/version and before/after hashes
 are recorded per environment under `inventory/runtime-replacements/`. The matching

@@ -1,6 +1,12 @@
 name: GPU image
 
 on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -36,11 +42,8 @@ on:
         description: Store the unreviewed image only in a private candidate package
         type: boolean
         default: false
-  push:
-    tags: ['gpu-v*']
-
 permissions:
-  contents: read
+  contents: write
   packages: read
 
 concurrency:
@@ -48,25 +51,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install detector dependencies
+        run: python -m pip install -e .
+      - name: Run unit tests
+        run: cd tests && python3 -m unittest discover -s .
+
   build:
+    needs: tests
+    if: github.event_name != 'pull_request' && (github.event_name != 'push' || github.ref_name == 'develop')
     runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:
-      contents: read
+      contents: write
       packages: write
     outputs:
       reference: ${{ steps.pushed.outputs.reference }}
       digest: ${{ steps.pushed.outputs.digest }}
       image_id: ${{ steps.identity.outputs.image_id }}
+      publish: ${{ steps.publication.outputs.publish }}
+      source_url: ${{ steps.publication.outputs.source_url }}
+      source_sha256: ${{ steps.publication.outputs.source_sha256 }}
     env:
       IMAGE: ghcr.io/rm-fm/azuracast-intro-detector-gpu
-      TAG: ${{ github.event.inputs.tag || github.ref_name }}
-      SOURCE_URL: ${{ inputs.corresponding_source_url }}
+      TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+      SOURCE_URL: ${{ inputs.corresponding_source_url || (github.event_name == 'release' && format('https://github.com/{0}/releases/download/{1}/corresponding-source.tar.gz', github.repository, github.event.release.tag_name)) || '' }}
       SOURCE_SHA256: ${{ inputs.corresponding_source_sha256 }}
-      REDISTRIBUTION_REVIEWED: ${{ inputs.redistribution_reviewed }}
+      REDISTRIBUTION_REVIEWED: "${{ inputs.redistribution_reviewed || (github.event_name == 'release' && contains(github.event.release.body, 'REDISTRIBUTION REVIEWED: APPROVED')) }}"
       REVIEWED_IMAGE_ID: ${{ inputs.reviewed_image_id }}
       PYTHON_IMAGE: ${{ inputs.base_image || 'python:3.11-slim-bookworm' }}
       OWNER_TYPE: ${{ github.event.repository.owner.type }}
+      PUBLISH: ${{ inputs.publish || github.event_name == 'release' }}
+      STAGE_CANDIDATE: ${{ inputs.stage_candidate || (github.event_name == 'push' && github.ref_name == 'develop') || github.event_name == 'release' }}
     steps:
       - name: Free runner disk space for a ~20 GB image
         run: |
@@ -74,6 +96,8 @@ jobs:
           sudo docker image prune --all --force
           df -h /
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Validate build inputs
         run: |
           TAG="${TAG#gpu-}"
@@ -94,6 +118,17 @@ jobs:
           curl --fail --location --proto '=https' --proto-redir '=https' \
             --output corresponding-source.tar "$SOURCE_URL"
           printf '%s  corresponding-source.tar\n' "$SOURCE_SHA256" | sha256sum --check -
+      - name: Check release prerequisites
+        if: github.event_name == 'release'
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          project_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          test "${TAG#v}" = "$project_version"
+          test "$REDISTRIBUTION_REVIEWED" = true
+          [[ "$PYTHON_IMAGE" == *@sha256:* ]]
+          [[ "$SOURCE_URL" == "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/corresponding-source.tar.gz" ]]
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - name: Build
         run: |
           bash bin/image-context.sh worker "$RUNNER_TEMP/worker-context.tar"
@@ -128,19 +163,55 @@ jobs:
           docker cp "$container:/usr/share/doc/intro-detector" ./image-legal
           docker image inspect "$IMAGE:${TAG#gpu-}" > ./image-legal/image.json
           cp "$RUNNER_TEMP/worker-context.sha256" ./image-legal/
+      - name: Fetch and verify release source bundle
+        if: github.event_name == 'release'
+        id: release_source
+        env:
+          IMAGE_ID: ${{ steps.identity.outputs.image_id }}
+        run: |
+          mkdir -p source-material/native source-material/debian
+          python3 gpu/fetch_native_sources.py --output source-material/native
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates debian-archive-keyring dpkg-dev
+          snapshot=$(sed -n 's/^ARG DEBIAN_SNAPSHOT=//p' gpu/Dockerfile | head -n 1)
+          test -n "$snapshot"
+          python3 gpu/fetch_debian_sources.py \
+            --inventory image-legal/inventory/base/debian.tsv \
+            --output source-material/debian --snapshot "$snapshot"
+          python3 gpu/build_source_bundle.py \
+            --inventory image-legal --source-material source-material \
+            --repository . --worker-context "$RUNNER_TEMP/worker-context.tar" \
+            --image-id "$IMAGE_ID" --revision "$GITHUB_SHA" \
+            --output corresponding-source.tar.gz
+          python3 gpu/image_inventory.py --output image-legal \
+            --source-bundle corresponding-source.tar.gz \
+            --image-id "$IMAGE_ID" --revision "$GITHUB_SHA"
+          source_sha256=$(sha256sum corresponding-source.tar.gz | cut -d' ' -f1)
+          printf 'SOURCE_SHA256=%s\n' "$source_sha256" >> "$GITHUB_ENV"
+          printf 'source_sha256=%s\n' "$source_sha256" >> "$GITHUB_OUTPUT"
       - name: Verify corresponding source against the built image
-        if: inputs.publish
+        if: env.PUBLISH == 'true' && github.event_name != 'release'
         env:
           IMAGE_ID: ${{ steps.identity.outputs.image_id }}
         run: |
           python3 gpu/image_inventory.py --output image-legal \
             --source-bundle corresponding-source.tar --image-id "$IMAGE_ID" --revision "$GITHUB_SHA"
+      - name: Attach corresponding source to the GitHub release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" corresponding-source.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
       - uses: actions/upload-artifact@v4
         with:
           name: image-legal
           path: image-legal/
+      - name: Capture publication metadata
+        id: publication
+        run: |
+          printf 'publish=%s\nsource_url=%s\nsource_sha256=%s\n' \
+            "$PUBLISH" "$SOURCE_URL" "$SOURCE_SHA256" >> "$GITHUB_OUTPUT"
       - name: Store a private candidate without public release
-        if: inputs.stage_candidate
+        if: env.STAGE_CANDIDATE == 'true'
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -164,7 +235,9 @@ jobs:
           printf 'Private candidate: %s\n' "$candidate" >> "$GITHUB_STEP_SUMMARY"
       - name: Push
         id: pushed
-        if: inputs.publish
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           if docker manifest inspect "$IMAGE:${TAG#gpu-}" > /dev/null 2> "$RUNNER_TEMP/tag-check.log"; then
@@ -173,6 +246,13 @@ jobs:
           fi
           grep -Eiq 'manifest unknown|no such manifest' "$RUNNER_TEMP/tag-check.log"
           docker push "$IMAGE:${TAG#gpu-}"
+          package=azuracast-intro-detector-gpu
+          api="$GITHUB_API_URL/user/packages/container/$package/visibility"
+          if [[ "$OWNER_TYPE" == Organization ]]; then
+            api="$GITHUB_API_URL/orgs/$GITHUB_REPOSITORY_OWNER/packages/container/$package/visibility"
+          fi
+          visibility=$(gh api --method PATCH "$api" -f visibility=public --jq '.visibility')
+          test "$visibility" = public
           reference=$(docker image inspect "$IMAGE:${TAG#gpu-}" --format '{{index .RepoDigests 0}}')
           digest="${reference##*@}"
           [[ "$digest" =~ ^sha256:[[:xdigit:]]{64}$ ]]
@@ -180,19 +260,20 @@ jobs:
 
   public-pull:
     needs: build
-    if: inputs.publish
+    if: needs.build.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
-      contents: read
+      contents: write
       packages: write
     env:
       IMAGE: ghcr.io/rm-fm/azuracast-intro-detector-gpu
+      TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
       REFERENCE: ${{ needs.build.outputs.reference }}
       DIGEST: ${{ needs.build.outputs.digest }}
       IMAGE_ID: ${{ needs.build.outputs.image_id }}
-      SOURCE_URL: ${{ inputs.corresponding_source_url }}
-      SOURCE_SHA256: ${{ inputs.corresponding_source_sha256 }}
+      SOURCE_URL: ${{ needs.build.outputs.source_url }}
+      SOURCE_SHA256: ${{ needs.build.outputs.source_sha256 }}
     steps:
       - name: Verify anonymous manifest and full image pull on a fresh runner
         run: |
@@ -209,8 +290,13 @@ jobs:
           printf 'Image: %s\n\nDigest: %s\n\nSource: %s\n\nSource SHA256: %s\n' \
             "$REFERENCE" "$DIGEST" "$SOURCE_URL" "$SOURCE_SHA256" > release-evidence.md
           cat release-evidence.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Attach public image evidence to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" release-evidence.md --clobber --repo "$GITHUB_REPOSITORY"
       - name: Promote the installer alias
-        if: inputs.promote_default
+        if: inputs.promote_default || github.event_name == 'release'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker tag "$REFERENCE" "$IMAGE:v1"

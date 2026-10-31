@@ -378,16 +378,18 @@ Complete worker preparation before presenting a release as installable:
   must not be asked to reproduce this build on their detector server.
 2. Validate offline model loading. Changes to inference or detection also require
   the controlled comparisons described above; paid GPU work needs authorization.
-3. Assemble the exact corresponding-source bundle and complete the redistribution
-  review in [LICENSES.md](LICENSES.md). These are maintainer obligations.
-4. Publish with an immutable `vMAJOR.MINOR.PATCH` tag, pinned base-image digest,
-  reviewed candidate image ID, source URL/checksum and publication confirmation.
-  Set the GHCR package's visibility to public. A separate fresh runner must inspect
-  the manifest and download every image layer anonymously, then verify the digest
-  and candidate ID; an authenticated push or manifest-only check is insufficient.
-5. Enable `promote_default` only when the verified release should replace the `v1`
-  installer alias. Keep version tags immutable. Record tag, digest, source revision,
-  source-bundle URL and SHA256 beside the public image download.
+3. Complete the exact-version redistribution review in [LICENSES.md](LICENSES.md).
+  Add `REDISTRIBUTION REVIEWED: APPROVED` to the GitHub Release body only after
+  reviewing the image's source obligations, LGPL replacement rights, NVIDIA terms
+  and model notices.
+4. Publish a GitHub Release on a `main` commit with a `vMAJOR.MINOR.PATCH` tag that
+  matches `pyproject.toml`. Actions runs the tests, rebuilds and checks the image,
+  assembles and verifies the corresponding-source bundle, attaches it to the release,
+  publishes the immutable GHCR image, changes its visibility to public, and tests
+  an anonymous full pull by tag and digest. A failed gate does not publish the image.
+5. After the anonymous pull succeeds, the workflow promotes that same checked image
+  to the `v1` installer alias. The release evidence records its tag, digest, source
+  revision, source-bundle URL and SHA256.
 6. Test installation and update in a fresh disposable environment, without GHCR
   credentials. Verify API access, container health, preservation of configuration,
   credentials and stored data, and failures before configuration changes when the

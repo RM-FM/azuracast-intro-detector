@@ -166,14 +166,12 @@ Do not include driver or developer-tool binaries without checking their specific
 conditions. Export restrictions and any applicable codec patent obligations remain
 separate; this engineering inventory is not legal advice.
 
-**Release hold:** The exact candidate contains `libcheckpoint.so`,
-`libnvperf_host.so`, `libnvperf_target.so` and `libpcsamplingutil.so` in the CUDA
-12.1.105 CUPTI package, plus `libnccl.so.2` from NCCL 2.21.5. The cited CUDA
-Attachment A names `libcupti.so` and CUDA 12.9's `libnvJitLink.so`, but does not
-individually name those CUPTI helpers or NCCL. Confirm their applicable package
-terms and redistribution basis, or remove unused files/packages and rebuild/test.
-The versioned [NVIDIA redistribution record](NVIDIA_REDISTRIBUTION.md) remains
-`PENDING` until this is resolved. The release workflow must reject a pending record.
+The versioned [NVIDIA redistribution record](NVIDIA_REDISTRIBUTION.md) records the
+review of the CUPTI helpers, NCCL notice, retained CUDA libraries and cuSPARSELt
+supplement. Its current decision is `APPROVED`; every release still exports the
+exact candidate inventory and requires the maintainer's explicit review marker.
+Do not treat this technical record as legal advice or as approval of a different
+image, package set or source revision.
 
 Before publishing either image, assemble and retain a source bundle tied to its
 exported package inventory and image digest:
@@ -199,13 +197,28 @@ debugging rights. The libraries must remain replaceable in a derived image; do n
 add technical or contractual restrictions that defeat those rights. Preserve all
 applicable warranty disclaimers and do not imply endorsement by upstream authors.
 
-The GPU workflow builds and exports the legal inventory by default, including for
-`gpu-v*` tags. Publishing requires `publish`, a public HTTPS corresponding-source
-archive URL and SHA256, and an explicit redistribution-review confirmation. The
-workflow checks availability, archive checksum and the source manifest against the
-built image's ID, revision and exact package inventory. The confirmation represents
-a manual review of exact-source completeness, LGPL rights and NVIDIA terms, not an
-automatic legal certification. Put the same source location beside the registry image.
+Pull requests to `develop` and `main` run the Linux unit tests. Successful branch
+pushes build a commit-specific Candidate in the private
+`azuracast-intro-detector-gpu-candidate` package; they never publish the worker
+image.
+
+Publishing is triggered by publishing a GitHub Release whose tag is `vMAJOR.MINOR.PATCH`,
+matches `pyproject.toml`, and points to a commit on `main`. The release body must
+contain the exact marker `REDISTRIBUTION REVIEWED: APPROVED`. This marker records a
+maintainer's manual review of exact-source completeness, LGPL replacement rights,
+NVIDIA terms and the model notices; it is not an automatic legal certification.
+The release workflow pins the Debian snapshot, downloads hash-locked Native sources,
+retrieves every Debian source/version from the image inventory, and verifies all
+archives. It then builds the corresponding-source bundle from the exact image
+inventory, image ID and source revision, verifies its manifest, and attaches it as
+`corresponding-source.tar.gz` to the release. Only after that succeeds does it push
+the immutable versioned GHCR image, switch that package to public, and use a fresh
+runner with no GHCR credentials to pull the image by tag and digest and verify the
+source asset checksum. The release also promotes the checked image to `v1`.
+
+If any test, source, review, image or anonymous-pull check fails, the public image
+push/promotion does not complete. The GitHub Release itself is the explicit human
+release action; branch pushes alone never make an image public.
 
 For a manual Docker build, set `--build-arg CORRESPONDING_SOURCE_URL=https://...` after
 completing that review. The URL is recorded inside the image. An empty URL records
