@@ -486,6 +486,23 @@ class SourceBundleBuilder(unittest.TestCase):
             self.assertEqual(debian_fetch.required_sources(inventory),
                              [('other-source', '4.0'), ('shared-source', '2.0')])
 
+    def test_debian_source_fetcher_validates_existing_descriptors_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory = root / 'debian.tsv'
+            inventory.write_text(
+                'binary\tversion\tsource\tsource_version\n'
+                'first\t1.0\tone-source\t1.0\n'
+                'second\t2.0\ttwo-source\t2.0\n'
+                'third\t3.0\tthree-source\t3.0\n')
+            output = root / 'sources'
+            with patch.object(debian_fetch, 'dsc_records', return_value={}) as descriptors, \
+                    patch.object(debian_fetch.subprocess, 'run') as run, \
+                    patch.object(debian_fetch, 'verify', return_value=3):
+                self.assertEqual(debian_fetch.fetch(inventory, output, '20261030T000000Z'), 3)
+            self.assertEqual(descriptors.call_count, 1)
+            self.assertEqual(run.call_count, 4)
+
     def test_source_obligation_uses_component_license_not_embedded_references(self):
         package = dict(name='nvidia-cuda-cupti-cu12', version='12.1.105',
                        license='NVIDIA Proprietary Software', license_expression=None,

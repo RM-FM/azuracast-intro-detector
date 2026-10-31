@@ -111,7 +111,7 @@ def fetch(inventory, output, snapshot):
     sources = required_sources(inventory)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    existing = dsc_records(output)
+    existing = set(dsc_records(output))
     with tempfile.TemporaryDirectory(prefix='intro-debian-sources-') as temporary_root:
         source_list = Path(temporary_root) / 'debian.sources.list'
         source_list.write_text(
@@ -125,7 +125,8 @@ def fetch(inventory, output, snapshot):
         privilege = [] if os.geteuid() == 0 else ['sudo']
         subprocess.run([*privilege, 'apt-get', *options, 'update'], check=True)
         for source, version in sources:
-            if (source, version) in existing:
+            key = (source, version)
+            if key in existing:
                 continue
             try:
                 subprocess.run(
@@ -133,7 +134,7 @@ def fetch(inventory, output, snapshot):
                     cwd=output, capture_output=True, text=True, check=True)
             except subprocess.CalledProcessError:
                 fetch_from_snapshot_pool(source, version, snapshot, output)
-            existing = dsc_records(output)
+            existing.add(key)
     return verify(output, inventory)
 
 
