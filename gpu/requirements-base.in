@@ -1,0 +1,10 @@
+-c ../pod/experiments/requirements-qwen.txt
+-c ../pod/experiments/requirements-stem-comparison.txt
+torch==2.5.1+cu121
+torchaudio==2.5.1+cu121
+numpy<2
+demucs==4.0.1
+panns-inference==0.1.1
+librosa>=0.10,<0.11
+soundfile
+sherpa-onnx==1.13.8

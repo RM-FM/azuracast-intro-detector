@@ -1,0 +1,2 @@
+-c requirements-base.lock
+-r ../pod/experiments/requirements-qwen.txt

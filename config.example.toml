@@ -1,0 +1,105 @@
+# Copy to config.toml. Secrets (AzuraCast and Runpod API keys) come from .env, never from this file.
+# Simple settings first; the further down, the more specialised. Omitted settings use the defaults shown.
+# data_dir = "/data"
+
+# --- AzuraCast and stations -------------------------------------------------------------
+
+[azuracast]
+base_url = "https://radio.example.com"
+# "all": every enabled station the API key's user may view, new ones included; or a list of IDs,
+# e.g. [1, 2, 7]. Stations with their own [[stations]] block below are always included.
+# Default: "all", or only the [[stations]] blocks when there are any.
+stations = "all"
+timeout_seconds = 60
+# Only for a private Docker network to AzuraCast's web container (e.g. http://web):
+# allow_http = true
+
+# Applies to every station without its own [[stations]] block.
+[station_defaults]
+# off | shadow (decide and record, never write) | publish
+mode = "shadow"
+# Shorter files (station IDs, sweepers, unknown length) are not analyzed.
+min_song_seconds = 60
+# Songs in Jingle Mode playlists are always skipped; list further non-song playlist IDs here.
+exclude_playlists = []
+
+# --- Processing ----------------------------------------------------------------------------
+
+[scan]
+# true: analyze new uploads automatically; false: only queue them until `intro-detector process`.
+auto_process = true
+poll_seconds = 300
+# Wait this long after the last new upload before starting a GPU batch.
+batch_quiet_seconds = 120
+batch_max_songs = 100
+max_attempts = 2
+
+# --- Intro decision --------------------------------------------------------------------------
+# Applied to stored analyses: after a change, `intro-detector republish --station N` updates
+# the values without GPU work. Non-default values are recorded with every decision.
+
+[decision]
+# Vocals starting earlier than this leave no usable intro (intro_end = 0).
+no_intro_below_seconds = 2.0
+# Window for a musical handover cue; used only for openings verified free of vocals.
+music_min_seconds = 3.0
+music_max_seconds = 27.0
+
+# --- Per-station overrides --------------------------------------------------------------------
+# Any setting from [station_defaults]; repeat the block per station.
+
+# [[stations]]
+# id = 1
+# mode = "publish"
+# min_song_seconds = 90
+# exclude_playlists = [12]
+
+# --- GPU worker (Runpod) --------------------------------------------------------------------
+
+[runpod]
+# Runpod registry entry for a private GPU image (`runpodctl registry list`); empty for a public image.
+registry_auth_id = ""
+# Estimated GPU spend per UTC month; 0 disables the limit.
+monthly_budget_usd = 50.0
+max_price_per_hour = 0.90
+# Prepared image (gpu/Dockerfile): environments and all pinned models baked in.
+image = "ghcr.io/rm-fm/azuracast-intro-detector-gpu:v1"
+# Each batch picks the in-stock Secure Cloud GPU with the lowest expected cost:
+# price * (startup_minutes + songs * song_seconds / speed). Region does not matter.
+min_speed = 0.5
+startup_minutes = 5.0
+song_seconds = 15.0
+container_disk_gb = 80
+# Parallel pipeline lanes on one GPU (VRAM permitting), fed from a shared chunk queue
+# and started staggered so CPU-only stages overlap GPU stages of other lanes.
+lanes = 3
+lane_vram_gb = 7.0
+chunk_songs = 10
+stagger_seconds = 60
+worker_name = "azuracast-intro-detector"
+ssh_key = "/secrets/runpod-ssh-key"
+idle_seconds = 600
+wait_minutes = 20
+max_run_minutes = 240
+
+# Default: RTX 4090 only, the reference GPU for the detector. Other types are about half as
+# fast and can shift individual cues slightly; list them with their relative speed to allow them.
+# [runpod.gpus]
+# "NVIDIA GeForce RTX 4090" = 1.0
+# "NVIDIA RTX A5000" = 0.5
+
+# --- Advanced: vocal detection calibration ------------------------------------------------------
+# Tuned against listener-checked songs. Change only together with an A/B comparison
+# (intro-detector ab-report); wrong values silently produce wrong cues.
+
+[decision.vocals]
+# Vocal activity level (0-1) that counts as singing in the separated vocal stems.
+vocal_level = 0.1
+# Activity shorter than this is detector noise, not a vocal burst.
+min_burst_seconds = 0.5
+# A burst this long or this loud is a real vocal entrance; a single shorter, quieter
+# burst before the lyrics is treated as an ad-lib and ignored.
+strong_burst_seconds = 2.0
+strong_burst_level = 0.3
+# Opening syllables that do not count as the lead vocal when followed by real lyrics.
+adlib_words = ["ah", "ba", "be", "boom", "da", "eh", "hmm", "mm", "na", "ooh", "uh"]

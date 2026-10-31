@@ -1,0 +1,47 @@
+name: Bug report
+description: Report a reproducible detector problem without private data
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: "For vulnerabilities, use Security > Report a vulnerability. Do not include API keys, audio, station addresses, track names, databases or private analyses."
+  - type: input
+    id: version
+    attributes:
+      label: Detector version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Linux distribution, architecture, Docker Engine and Compose versions
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Use neutral examples without station or track identities
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Redacted error excerpt
+      description: Remove keys, credentials, addresses, filenames and private analysis data
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I removed credentials, audio, station and track identities, and private analysis data
+          required: true

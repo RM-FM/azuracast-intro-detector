@@ -1,0 +1,2 @@
+-c requirements-base.lock
+soxr==1.1.0

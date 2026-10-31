@@ -1,0 +1,3 @@
+-c requirements-base.lock
+-r ../pod/experiments/requirements-stem-comparison.txt
+panns-inference==0.1.1

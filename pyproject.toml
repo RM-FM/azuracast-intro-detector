@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azuracast-intro-detector"
+version = "0.1.0"
+description = "Detects song intros for AzuraCast Sweepers with the Ultimate GPU Pod pipeline"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "docs/LICENSES.md", "docs/MODELS.md", "licenses/*.txt", "licenses/upstream/*.txt", "licenses/model-cards/*.md", "licenses/manifest.json"]
+dependencies = ["numpy>=1.26,<3", "scikit-learn==1.8.0", "tomlkit>=0.13,<1", "python-dotenv>=1,<2"]
+
+[project.scripts]
+intro-detector = "intro_detector.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+intro_detector = ["data/*.json.gz"]

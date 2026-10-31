@@ -1,0 +1,5 @@
+-c requirements-base.lock
+cmake>=3.15
+nanobind>=2,<3
+scikit-build-core>=0.11
+setuptools-scm[toml]>=6.2

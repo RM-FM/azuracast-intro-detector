@@ -1,0 +1,24 @@
+services:
+  detector:
+    build: .
+    image: azuracast-intro-detector:local
+    restart: unless-stopped
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "intro-detector", "health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    volumes:
+      - ./config.toml:/config/config.toml:ro
+      - ./secrets/runpod-ssh-key:/secrets/runpod-ssh-key:ro
+      - detector-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  detector-data:

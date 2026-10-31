@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+/build/
+/data/
+/config.toml
+.env
+*.sqlite3
+*.sqlite3-*
+/AGENTS.md
+/.setup-backups/
+/.setup-*/

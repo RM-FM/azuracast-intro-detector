@@ -1,0 +1,228 @@
+name: GPU image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag
+        required: true
+        default: v0.1.0
+      base_image:
+        description: Python base image; publishing requires an exact sha256 digest
+        type: string
+        default: python:3.11-slim-bookworm@sha256:94a8fee35252d06ab75856f15f12c7bae67b10e8a6da93c7fded82b2610926cd
+      publish:
+        description: Publish after completing the redistribution review
+        type: boolean
+        default: false
+      corresponding_source_url:
+        description: Public HTTPS archive of the complete corresponding source for this image
+        type: string
+      corresponding_source_sha256:
+        description: SHA256 of the corresponding-source archive
+        type: string
+      redistribution_reviewed:
+        description: Exact-version source, LGPL replacement rights and NVIDIA terms have been reviewed
+        type: boolean
+        default: false
+      reviewed_image_id:
+        description: Exact sha256 image ID from the reviewed reproducible candidate build
+        type: string
+      promote_default:
+        description: Update the v1 installer alias after the anonymous full pull passes
+        type: boolean
+        default: false
+      stage_candidate:
+        description: Store the unreviewed image only in a private candidate package
+        type: boolean
+        default: false
+  push:
+    tags: ['gpu-v*']
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: gpu-image-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      reference: ${{ steps.pushed.outputs.reference }}
+      digest: ${{ steps.pushed.outputs.digest }}
+      image_id: ${{ steps.identity.outputs.image_id }}
+    env:
+      IMAGE: ghcr.io/rm-fm/azuracast-intro-detector-gpu
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      SOURCE_URL: ${{ inputs.corresponding_source_url }}
+      SOURCE_SHA256: ${{ inputs.corresponding_source_sha256 }}
+      REDISTRIBUTION_REVIEWED: ${{ inputs.redistribution_reviewed }}
+      REVIEWED_IMAGE_ID: ${{ inputs.reviewed_image_id }}
+      PYTHON_IMAGE: ${{ inputs.base_image || 'python:3.11-slim-bookworm' }}
+      OWNER_TYPE: ${{ github.event.repository.owner.type }}
+    steps:
+      - name: Free runner disk space for a ~20 GB image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost
+          sudo docker image prune --all --force
+          df -h /
+      - uses: actions/checkout@v4
+      - name: Validate build inputs
+        run: |
+          TAG="${TAG#gpu-}"
+          [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
+          [[ "$PYTHON_IMAGE" =~ ^python:3\.11-slim-bookworm(@sha256:[[:xdigit:]]{64})?$ ]]
+          if [[ "${{ inputs.stage_candidate }}" == true ]]; then
+            test "${{ inputs.publish }}" != true
+          fi
+      - name: Check publication prerequisites
+        if: inputs.publish
+        run: |
+          test "$REDISTRIBUTION_REVIEWED" = true
+          [[ "${TAG#gpu-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$REVIEWED_IMAGE_ID" =~ ^sha256:[[:xdigit:]]{64}$ ]]
+          [[ "$PYTHON_IMAGE" == *@sha256:* ]]
+          [[ "$SOURCE_URL" == https://* ]]
+          [[ "$SOURCE_SHA256" =~ ^[[:xdigit:]]{64}$ ]]
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --output corresponding-source.tar "$SOURCE_URL"
+          printf '%s  corresponding-source.tar\n' "$SOURCE_SHA256" | sha256sum --check -
+      - name: Build
+        run: |
+          bash bin/image-context.sh worker "$RUNNER_TEMP/worker-context.tar"
+          sha256sum "$RUNNER_TEMP/worker-context.tar" > "$RUNNER_TEMP/worker-context.sha256"
+          docker build -f gpu/Dockerfile \
+            --build-arg PYTHON_IMAGE="$PYTHON_IMAGE" \
+            --build-arg CORRESPONDING_SOURCE_URL="$SOURCE_URL" \
+            --build-arg IMAGE_VERSION="${TAG#gpu-}" \
+            --build-arg SOURCE_REVISION="$GITHUB_SHA" \
+            --build-arg SOURCE_DATE_EPOCH=0 \
+            -t "$IMAGE:${TAG#gpu-}" - < "$RUNNER_TEMP/worker-context.tar"
+      - name: Record candidate identity
+        id: identity
+        run: |
+          image_id=$(docker image inspect "$IMAGE:${TAG#gpu-}" --format '{{.Id}}')
+          printf 'image_id=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
+          printf 'Candidate image ID: %s\n' "$image_id" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$REDISTRIBUTION_REVIEWED" == true ]]; then
+            test "$image_id" = "$REVIEWED_IMAGE_ID"
+          fi
+      - name: Verify models are complete without network access
+        run: |
+          docker run --rm --network none --entrypoint /workspace/stem-comparison-venv/bin/python "$IMAGE:${TAG#gpu-}" /app/prefetch.py stem
+          docker run --rm --network none --entrypoint /workspace/qwen-asr-venv/bin/python "$IMAGE:${TAG#gpu-}" /app/prefetch.py qwen
+          docker run --rm --network none --entrypoint /workspace/qwen-asr-venv/bin/python "$IMAGE:${TAG#gpu-}" -c "import qwen_asr, transformers; print('qwen imports ok')"
+          docker run --rm --network none --entrypoint /workspace/stem-comparison-venv/bin/python "$IMAGE:${TAG#gpu-}" -c "import whisper, demucs, panns_inference, yaml, soundfile; print('stem imports ok')"
+          docker image inspect "$IMAGE:${TAG#gpu-}" --format 'size {{.Size}}'
+      - name: Export notices and exact package inventory
+        run: |
+          container=$(docker create "$IMAGE:${TAG#gpu-}")
+          trap 'docker rm "$container"' EXIT
+          docker cp "$container:/usr/share/doc/intro-detector" ./image-legal
+          docker image inspect "$IMAGE:${TAG#gpu-}" > ./image-legal/image.json
+          cp "$RUNNER_TEMP/worker-context.sha256" ./image-legal/
+      - name: Verify corresponding source against the built image
+        if: inputs.publish
+        env:
+          IMAGE_ID: ${{ steps.identity.outputs.image_id }}
+        run: |
+          python3 gpu/image_inventory.py --output image-legal \
+            --source-bundle corresponding-source.tar --image-id "$IMAGE_ID" --revision "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-legal
+          path: image-legal/
+      - name: Store a private candidate without public release
+        if: inputs.stage_candidate
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          owner_namespace=users
+          if [[ "$OWNER_TYPE" == Organization ]]; then owner_namespace=orgs; fi
+          package=azuracast-intro-detector-gpu-candidate
+          api="$GITHUB_API_URL/$owner_namespace/$GITHUB_REPOSITORY_OWNER/packages/container/$package"
+          code=$(curl --silent --show-error --output "$RUNNER_TEMP/candidate-package.json" \
+            --write-out '%{http_code}' -H "Authorization: Bearer $TOKEN" "$api")
+          if [[ "$code" == 200 ]]; then
+            jq --exit-status '.visibility == "private"' "$RUNNER_TEMP/candidate-package.json"
+          else
+            test "$code" = 404
+          fi
+          candidate="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$package:${TAG#gpu-}-$GITHUB_SHA"
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag "$IMAGE:${TAG#gpu-}" "$candidate"
+          docker push "$candidate"
+          curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$api" \
+            | jq --exit-status '.visibility == "private"'
+          printf 'Private candidate: %s\n' "$candidate" >> "$GITHUB_STEP_SUMMARY"
+      - name: Push
+        id: pushed
+        if: inputs.publish
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if docker manifest inspect "$IMAGE:${TAG#gpu-}" > /dev/null 2> "$RUNNER_TEMP/tag-check.log"; then
+            echo 'Refusing to overwrite an existing version tag.' >&2
+            exit 1
+          fi
+          grep -Eiq 'manifest unknown|no such manifest' "$RUNNER_TEMP/tag-check.log"
+          docker push "$IMAGE:${TAG#gpu-}"
+          reference=$(docker image inspect "$IMAGE:${TAG#gpu-}" --format '{{index .RepoDigests 0}}')
+          digest="${reference##*@}"
+          [[ "$digest" =~ ^sha256:[[:xdigit:]]{64}$ ]]
+          printf 'reference=%s\ndigest=%s\n' "$IMAGE:${TAG#gpu-}" "$digest" >> "$GITHUB_OUTPUT"
+
+  public-pull:
+    needs: build
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/rm-fm/azuracast-intro-detector-gpu
+      REFERENCE: ${{ needs.build.outputs.reference }}
+      DIGEST: ${{ needs.build.outputs.digest }}
+      IMAGE_ID: ${{ needs.build.outputs.image_id }}
+      SOURCE_URL: ${{ inputs.corresponding_source_url }}
+      SOURCE_SHA256: ${{ inputs.corresponding_source_sha256 }}
+    steps:
+      - name: Verify anonymous manifest and full image pull on a fresh runner
+        run: |
+          public_config=$(mktemp -d)
+          trap 'rm -rf "$public_config"' EXIT
+          test -z "$(docker image ls "$IMAGE" --quiet)"
+          docker --config "$public_config" manifest inspect "$REFERENCE" > manifest.json
+          docker --config "$public_config" pull "$REFERENCE"
+          docker image inspect "$REFERENCE" --format '{{json .RepoDigests}}' | grep -F "$IMAGE@$DIGEST"
+          test "$(docker image inspect "$REFERENCE" --format '{{.Id}}')" = "$IMAGE_ID"
+          docker --config "$public_config" pull "$IMAGE@$DIGEST"
+          curl --fail --location --proto '=https' --proto-redir '=https' --output source.tar "$SOURCE_URL"
+          printf '%s  source.tar\n' "$SOURCE_SHA256" | sha256sum --check -
+          printf 'Image: %s\n\nDigest: %s\n\nSource: %s\n\nSource SHA256: %s\n' \
+            "$REFERENCE" "$DIGEST" "$SOURCE_URL" "$SOURCE_SHA256" > release-evidence.md
+          cat release-evidence.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Promote the installer alias
+        if: inputs.promote_default
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$REFERENCE" "$IMAGE:v1"
+          docker push "$IMAGE:v1"
+          public_config=$(mktemp -d)
+          trap 'rm -rf "$public_config"' EXIT
+          docker --config "$public_config" manifest inspect "$IMAGE:v1" >/dev/null
+          docker --config "$public_config" pull "$IMAGE:v1"
+          docker image inspect "$IMAGE:v1" --format '{{json .RepoDigests}}' | grep -F "$IMAGE@$DIGEST"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-image-evidence
+          path: |
+            release-evidence.md
+            manifest.json

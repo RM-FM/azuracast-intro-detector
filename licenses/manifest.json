@@ -1,0 +1,89 @@
+{
+    "schema":  1,
+    "files":  [
+                  {
+                      "url":  "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt",
+                      "component":  "Apache-licensed components",
+                      "file":  "Apache-2.0.txt",
+                      "sha256":  "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff"
+                  },
+                  {
+                      "url":  "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/CC-BY-4.0.txt",
+                      "component":  "PANNs weights",
+                      "file":  "CC-BY-4.0.txt",
+                      "sha256":  "d557539df68e771cc1eedcc91d13f70fca930e508d11eedcafa4b15db49e3744"
+                  },
+                  {
+                      "url":  "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+                      "component":  "MIT model-card declarations",
+                      "file":  "MIT.txt",
+                      "sha256":  "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5"
+                  },
+                  {
+                      "url":  "https://raw.githubusercontent.com/huggingface/tokenizers/v0.22.2/LICENSE",
+                      "component":  "Tokenizers 0.22.2",
+                      "file":  "Apache-2.0.txt",
+                      "sha256":  "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff"
+                  },
+                  {
+                      "url":  "https://raw.githubusercontent.com/triton-lang/triton/v3.1.0/LICENSE",
+                      "component":  "Triton 3.1.0",
+                      "file":  "MIT.txt",
+                      "sha256":  "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5"
+                  },
+                  {
+                      "url":  "https://raw.githubusercontent.com/runpod/runpodctl/v3.0.1/LICENSE",
+                      "component":  "runpodctl 3.0.1",
+                      "file":  "GPL-3.0.txt",
+                      "sha256":  "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+                  },
+                  {
+                      "url":  "https://raw.githubusercontent.com/ZFTurbo/Music-Source-Separation-Training/9430afc97432ba22cdae8171a0567759c229df82/LICENSE",
+                      "component":  "MSST inference code",
+                      "file":  "upstream/msst-LICENSE.txt",
+                      "sha256":  "3282dc057695ef5b9a64909a7092ca40b2c292c232580fc6ace6e5d665cc0207"
+                  },
+                  {
+                      "url":  "https://raw.githubusercontent.com/openai/whisper/v20250625/LICENSE",
+                      "component":  "Whisper code and weights",
+                      "file":  "upstream/whisper-LICENSE.txt",
+                      "sha256":  "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d"
+                  },
+                  {
+                      "url":  "https://raw.githubusercontent.com/facebookresearch/demucs/v4.0.1/LICENSE",
+                      "component":  "Demucs code and weights",
+                      "file":  "upstream/demucs-LICENSE.txt",
+                      "sha256":  "cf9b17822d1fcd4ff32ccbe14183386fb3adf6f2ff92dc184130823f7fc28173"
+                  },
+                  {
+                      "url":  "https://huggingface.co/KimberleyJSN/melbandroformer/raw/ac9b0614ab3cd7f77219e18ba494dfd93956c348/README.md",
+                      "component":  "KimberleyJSN/melbandroformer weights",
+                      "file":  "model-cards/melbandroformer.md",
+                      "sha256":  "5c1b3fd193f37b9dcdd947a12e566189f1c9d2664f4e5e95548e6a4b9fc7adab"
+                  },
+                  {
+                      "url":  "https://huggingface.co/duclvQ/smad/raw/157a6316366bcf8831baf23df742edb71f07eb47/README.md",
+                      "component":  "duclvQ/smad code and weights",
+                      "file":  "model-cards/smad.md",
+                      "sha256":  "5b02a55caa5f07fe1071cd9027d15051c5dad440aee1d96c173dcb5cdd1396da"
+                  },
+                  {
+                      "url":  "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/raw/7278e1e70fe206f11671096ffdd38061171dd6e5/README.md",
+                      "component":  "Qwen3-ASR-1.7B weights",
+                      "file":  "model-cards/qwen-asr.md",
+                      "sha256":  "5058416891bc47a2051557765997e8c42f8eb78a0e33c3e775bd17d4b0ba4d50"
+                  },
+                  {
+                      "url":  "https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B/raw/c7cbfc2048c462b0d63a45797104fc9db3ad62b7/README.md",
+                      "component":  "Qwen3-ForcedAligner-0.6B weights",
+                      "file":  "model-cards/qwen-aligner.md",
+                      "sha256":  "5058416891bc47a2051557765997e8c42f8eb78a0e33c3e775bd17d4b0ba4d50"
+                  },
+                  {
+                      "url":  "https://raw.githubusercontent.com/lucidrains/BS-RoFormer/390cf293367cba1051f12b68daf549bd4b12e647/LICENSE",
+                      "component":  "Original Mel-Band implementation",
+                      "file":  "upstream/bs-roformer-LICENSE.txt",
+                      "sha256":  "242a377761ef3853c662f6977e7617e3eaa347242f544968a796512135cc83e5"
+                  }
+              ]
+}

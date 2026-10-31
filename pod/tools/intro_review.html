@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Intro benchmark · listening review</title>
+<style>
+body{font:16px system-ui,sans-serif;background:#10151c;color:#e5edf5;max-width:1200px;margin:24px auto;padding:0 20px}button,input,select,textarea{font:inherit;color:inherit;background:#1e2936;border:1px solid #536477;border-radius:6px;padding:7px;margin:4px}button{cursor:pointer}h1{font-size:26px}h2{font-size:20px}small,.muted{color:#acbbca}section{border:1px solid #354455;padding:16px;margin:18px 0;border-radius:10px}audio{width:100%;margin:12px 0}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid #354455}textarea{width:90%}input[type=number]{width:100px}label{display:inline-block;margin-right:15px}pre{white-space:pre-wrap;overflow-wrap:anywhere}#candidates{max-height:500px;overflow:auto}#position{font-variant-numeric:tabular-nums;font-size:22px}.pill{color:#82d8b0}#status{color:#ffd68a}details{margin:12px 0}
+</style>
+<h1>Intro benchmark · listening review</h1>
+<p>First 30 seconds, original file positions. These are experimental candidates, not approved playout cues. Listen to the original mix before judging; a clean stem or matching transcript can still be wrong.</p>
+<button id="export">Download annotations.json</button><label>Import annotations <input id="import" type="file" accept=".json"></label><span id="status"></span>
+<section><button id="previous">← Previous</button><select id="song"></select><button id="next">Next →</button><p id="identity" class="muted"></p>
+<select id="input"></select><button id="start">Play from start</button><span id="position">0.000s</span><audio id="player" controls preload="metadata"></audio>
+<label>Seek to <input id="seek" type="number" min="0" step=".01" value="0"></label><button id="seekPlay">Play</button><button id="back">−3 seconds</button>
+<p id="limit" class="muted"></p></section>
+<section><h2>Listening truth</h2><p>Leave unknown values blank. “No vocal within excerpt” only certifies the heard window, not the whole song. Wordless singing, hums and vocoder vocals count as vocals.</p>
+<label>First vocal (s)<input data-field="first_vocal_s" type="number" min="0" step=".01"></label><button data-capture="first_vocal_s">Use player time</button><br>
+<label>First word (s)<input data-field="first_word_s" type="number" min="0" step=".01"></label><button data-capture="first_word_s">Use player time</button><br>
+<label>Radio handover (s)<input data-field="radio_handover_s" type="number" min="0" step=".01"></label><button data-capture="radio_handover_s">Use player time</button><br>
+<label><input id="noVocal" type="checkbox">No vocal within excerpt</label>
+<label>Tolerance (s)<input data-field="tolerance_s" type="number" min="0" max="5" step=".05"></label>
+<label>Evaluation split<select id="split"><option value="development">Development</option><option value="holdout">Holdout</option></select></label>
+<p>Keep future test songs as holdout when choosing thresholds on the original 40.</p>
+<textarea id="notes" rows="3" placeholder="Listening notes, ad-libs, uncertain onset range…"></textarea></section>
+<section><h2>Candidate boundaries</h2><input id="filter" placeholder="Filter chain, e.g. demucs/qwen"><button id="original">Switch to original mix</button><div id="candidates"></div></section>
+<section><h2>Transcripts and acoustic evidence</h2><div id="evidence"></div></section>
+<p class="muted">Download your annotations before closing. Import the JSON with intro_benchmark.py --labels to recalculate rankings without a GPU. Scores and model selection never update the live stream.</p>
+<script>
+'use strict';
+const DATA=/*BENCHMARK_DATA*/null;
+const $=id=>document.getElementById(id), player=$('player');
+let selected=0, dirty=false;
+const labelFor=row=>DATA.labels.tracks.find(l=>l.song===row.song&&l.sha256===row.sha256);
+const current=()=>DATA.rows[selected], label=()=>labelFor(current());
+function changed(){dirty=true;$('status').textContent='Unsaved listening edits — download annotations.';}
+function playAt(t){player.currentTime=Math.max(0,Math.min(t,current().duration-.02));player.play().catch(e=>{$('status').textContent=e.message;});}
+function text(parent,tag,value){const e=document.createElement(tag);e.textContent=value;parent.append(e);return e;}
+function button(parent,caption,fn){const b=text(parent,'button',caption);b.onclick=fn;return b;}
+function renderCandidates(){
+ const box=$('candidates');box.replaceChildren();const table=document.createElement('table');box.append(table);
+ const head=document.createElement('tr');table.append(head);['Chain','Candidate','Listen','Your verdict'].forEach(t=>text(head,'th',t));
+ const query=$('filter').value.toLowerCase();
+ for(const c of current().candidates.filter(c=>c.chain.toLowerCase().includes(query))){
+  const tr=document.createElement('tr');table.append(tr);const name=text(tr,'td',c.chain);name.title=c.reason;
+  text(tr,'td',c.cue_s===null?'Abstain':c.cue_s.toFixed(3)+'s');const controls=text(tr,'td','');
+  if(c.cue_s!==null){button(controls,'At cue',()=>playAt(c.cue_s));button(controls,'−3s',()=>playAt(c.cue_s-3));}
+  const td=text(tr,'td',''), select=document.createElement('select');td.append(select);
+  for(const [v,t] of [['','Not judged'],['correct','Correct'],['incorrect','Incorrect']]){const o=text(select,'option',t);o.value=v;}
+  const previous=(label().verdicts||{})[c.chain];select.value=previous&&previous.policy===DATA.policy&&previous.cue_s===c.cue_s?previous.value:'';
+  select.onchange=()=>{label().verdicts||={};if(select.value)label().verdicts[c.chain]={value:select.value,cue_s:c.cue_s,policy:DATA.policy};else delete label().verdicts[c.chain];changed();};
+ }
+}
+function selectInput(){player.pause();const src=current().audio[$('input').value];if(src)player.src=src;else{player.removeAttribute('src');player.load();}}
+function render(){
+ const row=current(), l=label();$('song').value=String(selected);$('identity').textContent=`${selected+1}/${DATA.rows.length} · ${row.song} · SHA256 ${row.sha256}`;
+ $('input').replaceChildren();for(const name of Object.keys(row.audio)){const o=text($('input'),'option',name);o.value=name;}
+ selectInput();$('limit').textContent=`Excerpt ends at ${row.duration.toFixed(3)}s. No audio was trimmed from its beginning.`;
+ for(const e of document.querySelectorAll('[data-field]'))e.value=l[e.dataset.field]??'';
+ $('noVocal').checked=!!l.no_vocal_in_window;$('split').value=l.split;$('notes').value=l.notes||'';
+ renderCandidates();const evidence=$('evidence');evidence.replaceChildren();
+ for(const [name,r] of Object.entries(row.asr)){const d=text(evidence,'details','');text(d,'summary',`${name} · first word ${r.first_word_start??'none'} · ${(r.quality_flags||[]).join(', ')||'no structural flags'}`);text(d,'pre',r.text);text(d,'pre',JSON.stringify(r.words,null,2));}
+ for(const [name,r] of Object.entries(row.acoustic)){const d=text(evidence,'details','');text(d,'summary',`${name} · acoustic classes by window`);text(d,'pre',JSON.stringify(r.windows,null,2));}
+}
+DATA.rows.forEach((r,i)=>{const o=text($('song'),'option',r.song);o.value=String(i);});
+$('song').onchange=()=>{selected=Number($('song').value);render();};
+$('previous').onclick=()=>{selected=Math.max(0,selected-1);render();};$('next').onclick=()=>{selected=Math.min(DATA.rows.length-1,selected+1);render();};
+$('input').onchange=selectInput;$('start').onclick=()=>playAt(0);$('seekPlay').onclick=()=>playAt(Number($('seek').value));$('back').onclick=()=>playAt(player.currentTime-3);
+$('original').onclick=()=>{if(current().audio.original){$('input').value='original';const t=player.currentTime;selectInput();player.onloadedmetadata=()=>{player.currentTime=Math.min(t,player.duration);player.onloadedmetadata=null;};}};
+player.ontimeupdate=()=>{$('position').textContent=player.currentTime.toFixed(3)+'s';};
+for(const e of document.querySelectorAll('[data-field]'))e.onchange=()=>{const v=e.value===''?null:Number(e.value);if(v!==null&&(!Number.isFinite(v)||v<0||(e.dataset.field==='tolerance_s'&&v>5))){e.value=label()[e.dataset.field]??'';return;}label()[e.dataset.field]=v;if(e.dataset.field==='first_vocal_s'&&v!==null){label().no_vocal_in_window=false;$('noVocal').checked=false;}changed();};
+for(const e of document.querySelectorAll('[data-capture]'))e.onclick=()=>{const field=document.querySelector(`[data-field="${e.dataset.capture}"]`);field.value=player.currentTime.toFixed(3);field.onchange();};
+$('noVocal').onchange=()=>{label().no_vocal_in_window=$('noVocal').checked;if($('noVocal').checked){label().first_vocal_s=null;document.querySelector('[data-field="first_vocal_s"]').value='';}changed();};
+$('split').onchange=()=>{label().split=$('split').value;changed();};$('notes').oninput=()=>{label().notes=$('notes').value;changed();};$('filter').oninput=renderCandidates;
+$('export').onclick=()=>{const blob=new Blob([JSON.stringify(DATA.labels,null,2)+'\n'],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='annotations.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);dirty=false;$('status').textContent='Annotations downloaded. Keep the file and import it when scoring.';};
+$('import').onchange=async()=>{try{const incoming=JSON.parse(await $('import').files[0].text());if(incoming.schema!==1||!Array.isArray(incoming.tracks))throw Error('Invalid annotations');for(const l of incoming.tracks){const old=DATA.labels.tracks.find(x=>x.song===l.song&&x.sha256===l.sha256);if(old)Object.assign(old,l);}changed();render();}catch(e){$('status').textContent=e.message;}};
+window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue='';}});
+if(DATA.rows.length)render();
+</script></html>

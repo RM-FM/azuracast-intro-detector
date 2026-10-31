@@ -1,0 +1,5 @@
+# Install only inside the experimental GPU Pod. Reuse its existing CUDA torch.
+openai-whisper==20250625
+# Keep the image's CUDA stack and Demucs-compatible numpy when resolving deps.
+torch==2.5.1
+numpy<2

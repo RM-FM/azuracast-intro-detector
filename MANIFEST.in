@@ -1,0 +1,4 @@
+include LICENSE THIRD_PARTY_NOTICES.md
+include docs/LICENSES.md docs/MODELS.md
+include docs/ADVANCED.md config.example.toml bin/setup.sh
+recursive-include licenses *.txt *.md *.json
