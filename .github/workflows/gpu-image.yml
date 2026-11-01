@@ -87,6 +87,7 @@ jobs:
       REVIEWED_IMAGE_ID: ${{ inputs.reviewed_image_id }}
       PYTHON_IMAGE: ${{ inputs.base_image || 'python:3.11-slim-bookworm' }}
       OWNER_TYPE: ${{ github.event.repository.owner.type }}
+      GHCR_VISIBILITY_TOKEN: ${{ secrets.GHCR_VISIBILITY_TOKEN }}
       PUBLISH: ${{ inputs.publish || github.event_name == 'release' }}
       STAGE_CANDIDATE: ${{ inputs.stage_candidate || (github.event_name == 'push' && github.ref_name == 'develop') || github.event_name == 'release' }}
     steps:
@@ -115,6 +116,7 @@ jobs:
           [[ "$PYTHON_IMAGE" == *@sha256:* ]]
           [[ "$SOURCE_URL" == https://* ]]
           [[ "$SOURCE_SHA256" =~ ^[[:xdigit:]]{64}$ ]]
+          test -n "$GHCR_VISIBILITY_TOKEN"
           curl --fail --location --proto '=https' --proto-redir '=https' \
             --output corresponding-source.tar "$SOURCE_URL"
           printf '%s  corresponding-source.tar\n' "$SOURCE_SHA256" | sha256sum --check -
@@ -126,6 +128,7 @@ jobs:
           test "${TAG#v}" = "$project_version"
           test "$REDISTRIBUTION_REVIEWED" = true
           [[ "$PYTHON_IMAGE" == *@sha256:* ]]
+          test -n "$GHCR_VISIBILITY_TOKEN"
           [[ "$SOURCE_URL" == "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/corresponding-source.tar.gz" ]]
           git fetch origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
@@ -237,7 +240,7 @@ jobs:
         id: pushed
         if: env.PUBLISH == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GHCR_VISIBILITY_TOKEN }}
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           if docker manifest inspect "$IMAGE:${TAG#gpu-}" > /dev/null 2> "$RUNNER_TEMP/tag-check.log"; then

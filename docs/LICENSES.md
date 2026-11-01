@@ -216,6 +216,12 @@ the immutable versioned GHCR image, switch that package to public, and use a fre
 runner with no GHCR credentials to pull the image by tag and digest and verify the
 source asset checksum. The release also promotes the checked image to `v1`.
 
+Before enabling release publishing, configure the repository Actions secret
+`GHCR_VISIBILITY_TOKEN` with a classic personal access token for the package owner,
+scoped to `read:packages` and `write:packages`. GitHub requires a classic token for
+the package-visibility REST endpoint; the workflow checks for this secret before
+starting the image build and never prints its value.
+
 If any test, source, review, image or anonymous-pull check fails, the public image
 push/promotion does not complete. The GitHub Release itself is the explicit human
 release action; branch pushes alone never make an image public.
