@@ -17,9 +17,6 @@ on:
         description: Python base image; publishing requires an exact sha256 digest
         type: string
         default: python:3.11-slim-bookworm@sha256:94a8fee35252d06ab75856f15f12c7bae67b10e8a6da93c7fded82b2610926cd
-      source_revision:
-        description: Exact source commit to build and match; defaults to the selected ref
-        type: string
       generate_source_bundle:
         description: Generate and attach corresponding source from the selected source commit
         type: boolean
@@ -63,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_revision || github.sha }}
+          ref: ${{ github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -118,6 +115,7 @@ jobs:
       always() &&
       needs.tests.result == 'success' &&
       github.event_name != 'pull_request' &&
+      github.event_name != 'release' &&
       (github.event_name != 'push' || github.ref_name == 'develop') &&
       (github.event_name != 'push' || github.ref_name != 'develop' ||
        (needs.worker-context.result == 'success' && needs.worker-context.outputs.changed == 'true'))
@@ -136,7 +134,7 @@ jobs:
     env:
       IMAGE: ghcr.io/rm-fm/azuracast-intro-detector-gpu
       TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
-      SOURCE_REVISION: ${{ inputs.source_revision || github.sha }}
+      SOURCE_REVISION: ${{ github.sha }}
       GENERATE_SOURCE_BUNDLE: ${{ inputs.generate_source_bundle || false }}
       SOURCE_URL: ${{ inputs.corresponding_source_url || (github.event_name == 'release' && format('https://github.com/{0}/releases/download/{1}/corresponding-source.tar.gz', github.repository, github.event.release.tag_name)) || '' }}
       SOURCE_SHA256: ${{ inputs.corresponding_source_sha256 }}
@@ -156,7 +154,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ inputs.source_revision || github.sha }}
+          ref: ${{ github.sha }}
       - name: Validate build inputs
         run: |
           TAG="${TAG#gpu-}"
@@ -386,3 +384,43 @@ jobs:
           path: |
             release-evidence.md
             manifest.json
+
+  release-verify:
+    needs: [tests]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Verify the published release artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          IMAGE: ghcr.io/rm-fm/azuracast-intro-detector-gpu
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          project_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          test "${TAG#v}" = "$project_version"
+          release_body=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
+          [[ "$release_body" == *'REDISTRIBUTION REVIEWED: APPROVED'* ]]
+          gh release download "$TAG" --pattern corresponding-source.tar.gz --pattern release-evidence.md --repo "$GITHUB_REPOSITORY"
+          grep -Fqx "Image: $IMAGE:$TAG" release-evidence.md
+          digest=$(sed -n 's/^Digest: //p' release-evidence.md)
+          source_url=$(sed -n 's/^Source: //p' release-evidence.md)
+          source_sha256=$(sed -n 's/^Source SHA256: //p' release-evidence.md)
+          [[ "$digest" =~ ^sha256:[[:xdigit:]]{64}$ ]]
+          [[ "$source_sha256" =~ ^[[:xdigit:]]{64}$ ]]
+          test "$source_url" = "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/corresponding-source.tar.gz"
+          printf '%s  corresponding-source.tar.gz\n' "$source_sha256" | sha256sum --check -
+          public_config=$(mktemp -d)
+          trap 'rm -rf "$public_config"' EXIT
+          docker --config "$public_config" manifest inspect "$IMAGE:$TAG" >/dev/null
+          docker --config "$public_config" pull "$IMAGE:$TAG"
+          docker image inspect "$IMAGE:$TAG" --format '{{json .RepoDigests}}' | grep -F "$IMAGE@$digest"
+          docker --config "$public_config" pull "$IMAGE@$digest"
+          docker --config "$public_config" manifest inspect "$IMAGE:v1" >/dev/null
+          docker --config "$public_config" pull "$IMAGE:v1"
+          docker image inspect "$IMAGE:v1" --format '{{json .RepoDigests}}' | grep -F "$IMAGE@$digest"

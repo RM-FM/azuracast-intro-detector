@@ -378,35 +378,37 @@ Complete worker preparation before presenting a release as installable:
   must not be asked to reproduce this build on their detector server.
 2. Validate offline model loading. Changes to inference or detection also require
   the controlled comparisons described above; paid GPU work needs authorization.
-3. Complete the exact-version redistribution review in [LICENSES.md](LICENSES.md).
-  Add `REDISTRIBUTION REVIEWED: APPROVED` to the GitHub Release body only after
-  reviewing the image's source obligations, LGPL replacement rights, NVIDIA terms
-  and model notices.
-4. Publish a GitHub Release on a `main` commit with a `vMAJOR.MINOR.PATCH` tag that
-  matches `pyproject.toml`. Actions runs the tests, rebuilds and checks the image,
-  assembles and verifies the corresponding-source bundle, attaches it to the release,
-  publishes the immutable GHCR image, changes its visibility to public, and tests
-  an anonymous full pull by tag and digest. A failed gate does not publish the image.
-5. After the anonymous pull succeeds, the workflow promotes that same checked image
-  to the `v1` installer alias. The release evidence records its tag, digest, source
-  revision, source-bundle URL and SHA256.
-6. Test installation and update in a fresh disposable environment, without GHCR
+3. Run **GPU image** manually from `main` with `stage_candidate=true`, `publish=false`,
+  the target version, exact `main` commit, digest-pinned base image, and the future
+  corresponding-source asset URL. This builds a private candidate. Confirm offline
+  model loading and inspect the candidate's exact `image-legal` inventory.
+4. Complete the exact-version redistribution review in [LICENSES.md](LICENSES.md) and
+  against the candidate inventory. Review source obligations, LGPL replacement rights,
+  NVIDIA terms and model notices before approving redistribution.
+5. Create a draft GitHub Release on the `main` commit with a `vMAJOR.MINOR.PATCH` tag
+  matching `pyproject.toml`. Add `REDISTRIBUTION REVIEWED: APPROVED` to its body only
+  after that review. Keep the release as a draft.
+6. Dispatch **GPU image** again from the exact release tag ref, with the same tag,
+  base-image digest and source URL. This fixes the publish build to the commit used by
+  the candidate. Set `publish=true`, `generate_source_bundle=true`,
+  `redistribution_reviewed=true`, `reviewed_image_id` to the candidate image ID, and
+  `promote_default=true`. The workflow rebuilds and requires an exact image-ID match,
+  creates and attaches corresponding source, publishes the immutable GHCR tag, checks
+  an anonymous pull by tag and digest, and promotes that image to the `v1` alias.
+7. Confirm release evidence records the tag, digest, source revision, source-bundle URL
+  and SHA256. Only then publish the draft GitHub Release. Its release event verifies
+  the existing assets, public tag/digest and `v1` alias without rebuilding the image.
+8. Test installation and update in a fresh disposable environment, without GHCR
   credentials. Verify API access, container health, preservation of configuration,
   credentials and stored data, and failures before configuration changes when the
   image is unavailable. Do not start GPU processing during installation tests.
 
 ### Recovery for an existing tag
 
-If a tag predates the current release workflow, do not move it. Run **GPU image**
-manually from the `main` ref, set `tag` and `source_revision` to the release tag
-and its exact commit, and keep `base_image` digest-pinned. First run with
-`stage_candidate=true` and `publish=false`; use the successful run's image ID as
-`reviewed_image_id` for the publish run. For that run, enable `publish`,
-`generate_source_bundle`, `redistribution_reviewed` and `promote_default`, and set
-`corresponding_source_url` to the release asset URL ending in
-`/releases/download/<tag>/corresponding-source.tar.gz`. The workflow rebuilds and
-verifies the same source revision, creates and attaches its source bundle, then
-checks the anonymous pull before promoting `v1`.
+For an existing tag, never move it. Use its exact commit as `source_revision` for both
+manual runs and keep all build inputs identical. Create a draft release before the
+publish run so its corresponding-source URL exists. Publish the draft only after the
+manual publish run has verified the image and anonymous pull.
 
 `bin/image-context.sh` produces a deterministic tar context containing only
 versioned source and license inputs. The installer and worker workflow use it;
