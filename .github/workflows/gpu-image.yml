@@ -85,7 +85,7 @@ jobs:
       SOURCE_SHA256: ${{ inputs.corresponding_source_sha256 }}
       REDISTRIBUTION_REVIEWED: "${{ inputs.redistribution_reviewed || (github.event_name == 'release' && contains(github.event.release.body, 'REDISTRIBUTION REVIEWED: APPROVED')) }}"
       REVIEWED_IMAGE_ID: ${{ inputs.reviewed_image_id }}
-      PYTHON_IMAGE: ${{ inputs.base_image || 'python:3.11-slim-bookworm' }}
+      PYTHON_IMAGE: ${{ inputs.base_image || 'python:3.11-slim-bookworm@sha256:94a8fee35252d06ab75856f15f12c7bae67b10e8a6da93c7fded82b2610926cd' }}
       OWNER_TYPE: ${{ github.event.repository.owner.type }}
       GHCR_VISIBILITY_TOKEN: ${{ secrets.GHCR_VISIBILITY_TOKEN }}
       PUBLISH: ${{ inputs.publish || github.event_name == 'release' }}
