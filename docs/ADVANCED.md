@@ -395,6 +395,19 @@ Complete worker preparation before presenting a release as installable:
   credentials and stored data, and failures before configuration changes when the
   image is unavailable. Do not start GPU processing during installation tests.
 
+### Recovery for an existing tag
+
+If a tag predates the current release workflow, do not move it. Run **GPU image**
+manually from the `main` ref, set `tag` and `source_revision` to the release tag
+and its exact commit, and keep `base_image` digest-pinned. First run with
+`stage_candidate=true` and `publish=false`; use the successful run's image ID as
+`reviewed_image_id` for the publish run. For that run, enable `publish`,
+`generate_source_bundle`, `redistribution_reviewed` and `promote_default`, and set
+`corresponding_source_url` to the release asset URL ending in
+`/releases/download/<tag>/corresponding-source.tar.gz`. The workflow rebuilds and
+verifies the same source revision, creates and attaches its source bundle, then
+checks the anonymous pull before promoting `v1`.
+
 `bin/image-context.sh` produces a deterministic tar context containing only
 versioned source and license inputs. The installer and worker workflow use it;
 unversioned files, credentials, audio, databases and private reports are excluded.
