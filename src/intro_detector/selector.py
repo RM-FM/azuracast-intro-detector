@@ -10,7 +10,7 @@ from .core import selector_model as core
 from .evidence import INPUTS, compact
 
 TRAINING_POLICY = core.POLICY
-POLICY = f'{TRAINING_POLICY}+lead-vocal-guard-v1'
+POLICY = f'{TRAINING_POLICY}+lead-vocal-guard-v3'
 TRAINING_SCHEMA = 1
 BAD_TIMING_FLAGS = {'invalid_word_timing', 'nonmonotonic_word_timing',
                     'text_without_alignment', 'alignment_failed'}
@@ -56,7 +56,7 @@ class Selector:
         scores = self.model.predict(features)
         index = int(self._np.argmax(scores))
         cue = float(times[index])
-        lead_anchor, support = _lead_vocal_anchor(row, lead_events)
+        lead_anchor, support = _lead_vocal_anchor(row, lead_events, report_row)
         guarded = (lead_anchor is not None
                    and not lead_anchor - 1.0 <= cue <= lead_anchor)
         if guarded:
@@ -194,10 +194,26 @@ def _early_vocal_support(row, report_row):
         aligned_variants.add(source.split('/', 1)[0])
     lyric_variants = {source.split('/', 1)[0] for source, result in report_row.get('asr', {}).items()
                       if source.split('/', 1)[0] in INPUTS and _lyrics_from_start(result)}
-    return (len(acoustic_variants) >= 1 and len(aligned_variants) >= 2) or len(lyric_variants) >= 3
+    return ((len(acoustic_variants) >= 1 and len(aligned_variants) >= 2)
+            or len(lyric_variants) >= 3
+            or (len(lyric_variants) >= 2 and _smad_singing_support(report_row, 0.0)))
 
 
-def _lead_vocal_anchor(row, events):
+def _smad_singing_support(report_row, cue):
+    smad = (report_row or {}).get('smad') or {}
+    order = smad.get('class_order') or []
+    try:
+        singing_index = order.index('singing_music')
+    except ValueError:
+        return False
+    window_seconds = smad.get('window_seconds', 4.0)
+    return any(start <= cue + .25 and start + window_seconds >= cue - .25
+               and len(probability) > singing_index and probability[singing_index] >= .5
+               for start, probability in zip(smad.get('window_starts') or [],
+                                            smad.get('probabilities') or []))
+
+
+def _lead_vocal_anchor(row, events, report_row=None):
     if not events:
         return None, 0
     smad = row.get('smad') or {}
@@ -216,6 +232,8 @@ def _lead_vocal_anchor(row, events):
             start <= cue + .25 and start + window_seconds >= cue - .25
             and len(probability) > singing_index and probability[singing_index] >= .5
             for start, probability in zip(starts, probabilities))
+        early_lyric_support = (cue < 1.0 and len(_early_lyric_variants(report_row)) >= 2
+                               and singing_support)
         acoustic_support = False
         for variant in variants:
             for context in (4, 8):
@@ -231,10 +249,16 @@ def _lead_vocal_anchor(row, events):
                     break
             if acoustic_support:
                 break
-        corroborated = (acoustic_support and len(variants) >= 2) or (singing_support and len(variants) >= 3)
+        corroborated = ((acoustic_support and len(variants) >= 2)
+                        or (singing_support and len(variants) >= 3) or early_lyric_support)
         if corroborated:
             return min(time for time, _ in cluster), len(variants)
     return None, 0
+
+
+def _early_lyric_variants(report_row):
+    return {source.split('/', 1)[0] for source, result in (report_row or {}).get('asr', {}).items()
+            if source.split('/', 1)[0] in INPUTS and _lyrics_from_start(result)}
 
 
 def _early_panns_are_unverified(row, report_row, cue):

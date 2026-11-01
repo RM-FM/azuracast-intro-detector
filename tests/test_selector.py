@@ -39,7 +39,7 @@ class FrozenSelector(unittest.TestCase):
     def test_packaged_training_matches_vendored_policy(self):
         from intro_detector.selector import POLICY, Selector
         selector = Selector()
-        self.assertEqual(POLICY, 'intro-selector-extratrees-three-inputs-v2+lead-vocal-guard-v1')
+        self.assertEqual(POLICY, 'intro-selector-extratrees-three-inputs-v2+lead-vocal-guard-v3')
         self.assertEqual(selector.training_songs, 39)
 
     def test_lead_word_after_vocalization_guards_late_model_cue(self):
@@ -175,6 +175,47 @@ class FrozenSelector(unittest.TestCase):
             row['asr'][f'{variant}/turbo'] = dict(
                 text='Yeah you know', words=stray, first_word_start=0., quality_flags=[])
         self.assertFalse(_early_vocal_support(compact(row), row))
+
+    def test_two_early_lyric_stems_and_smad_anchor_over_late_vocal_cue(self):
+        from intro_detector.evidence import compact
+        from intro_detector.selector import Selector, _early_vocal_support
+
+        row = helpers.report_row('song.mp3', 'sha')
+        row['acoustic'] = {}
+        words = [dict(word=word, start_original=start) for word, start in
+                 ((" I've", 0.), (' never', .84), (' known', 1.2), (' someone', 1.8))]
+        for variant in ('original', 'demucs'):
+            for model in ('turbo', 'whisper_auto'):
+                row['asr'][f'{variant}/{model}'] = dict(
+                    text="I've never known someone", words=words,
+                    first_word_start=0., quality_flags=[])
+        row['smad'] = dict(class_order=['none', 'singing_music'], window_starts=[0.],
+                           probabilities=[[.415, .585]], window_seconds=4., duration=30.)
+        row['candidates'] = [dict(chain=f'{variant}/panns-4s/0.1/level', cue_s=9.2)
+                             for variant in ('original', 'demucs', 'melband')]
+
+        selector = Selector()
+
+        class LateModel:
+            _np = selector._np
+
+            def predict(self, features):
+                return self._np.array([1. if abs(feature[0] - 9.2) < .01 else .1
+                                       for feature in features])
+
+        selector.model = LateModel()
+        self.assertTrue(_early_vocal_support(compact(row), row))
+        result = selector.predict(row)
+        self.assertEqual(result['cue_s'], 0.)
+        self.assertEqual(result['decision_s'], 0.)
+        self.assertEqual(result['lead_anchor_s'], 0.)
+        self.assertEqual(result['lead_anchor_support'], 2)
+        self.assertTrue(result['lead_guard_applied'])
+
+        row['smad']['probabilities'] = [[.51, .49]]
+        self.assertFalse(_early_vocal_support(compact(row), row))
+        result = selector.predict(row)
+        self.assertEqual(result['decision_s'], 9.2)
 
     def test_single_weak_burst_is_ignored_but_repeated_or_strong_bursts_start_vocals(self):
         from intro_detector.selector import _early_vocal_onset

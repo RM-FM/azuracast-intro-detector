@@ -7,7 +7,7 @@ workers when a song needs analysis. No local GPU is required.
 Starts in **shadow mode**: proposed intro values are recorded, not written to AzuraCast.
 Existing manually edited intro values are protected.
 
-Version `0.1.0` is an experimental pre-release. Review proposed cues before enabling
+Version `0.1.1` is an experimental pre-release. Review proposed cues before enabling
 publishing; installation does not validate detection accuracy for your library.
 
 ## Quick Start
