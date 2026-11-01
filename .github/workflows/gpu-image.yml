@@ -72,9 +72,55 @@ jobs:
       - name: Run unit tests
         run: cd tests && python3 -m unittest discover -s .
 
+  worker-context:
+    if: github.event_name == 'push' && github.ref_name == 'develop'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.compare.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compare deterministic worker image contexts
+        id: compare
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [[ "$BEFORE" =~ ^0{40}$ ]] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --quiet "$BEFORE" "$AFTER" -- .github/workflows/gpu-image.yml; then
+            workflow_changed=false
+          else
+            workflow_changed=true
+          fi
+          if $workflow_changed; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git worktree add --quiet --detach "$RUNNER_TEMP/worker-before" "$BEFORE"
+          git worktree add --quiet --detach "$RUNNER_TEMP/worker-after" "$AFTER"
+          SOURCE_DATE_EPOCH=0 bash "$RUNNER_TEMP/worker-before/bin/image-context.sh" worker "$RUNNER_TEMP/worker-before.tar"
+          SOURCE_DATE_EPOCH=0 bash "$RUNNER_TEMP/worker-after/bin/image-context.sh" worker "$RUNNER_TEMP/worker-after.tar"
+          if cmp -s "$RUNNER_TEMP/worker-before.tar" "$RUNNER_TEMP/worker-after.tar"; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo 'Worker image build skipped: deterministic worker context is unchanged.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            echo 'Worker image build required: deterministic worker context changed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   build:
-    needs: tests
-    if: github.event_name != 'pull_request' && (github.event_name != 'push' || github.ref_name == 'develop')
+    needs: [tests, worker-context]
+    if: >-
+      always() &&
+      needs.tests.result == 'success' &&
+      github.event_name != 'pull_request' &&
+      (github.event_name != 'push' || github.ref_name == 'develop') &&
+      (github.event_name != 'push' || github.ref_name != 'develop' ||
+       (needs.worker-context.result == 'success' && needs.worker-context.outputs.changed == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:
