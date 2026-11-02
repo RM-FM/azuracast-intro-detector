@@ -53,8 +53,11 @@ script builds the service, verifies the worker image, prepares configuration, ge
 the worker SSH key, checks API access and waits for a healthy detector. API key prompts
 do not display the keys.
 
-Initial setup selects all stations visible to the API user, shadow mode and manual
-processing. It does not scan the existing library or start a paid GPU worker.
+Initial setup selects all stations visible to the API user, shadow mode and automatic
+processing. Its first sync inventories the existing library without queuing it for
+analysis; only later eligible new tracks with a blank `intro_end` are processed
+automatically. This may incur GPU charges. Setup does not start a GPU worker unless
+there is queued work.
 
 Continue with [First station setup](#first-station-setup).
 Other options are in [manual installation](docs/ADVANCED.md#manual-installation).
