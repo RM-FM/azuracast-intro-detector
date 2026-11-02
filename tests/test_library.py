@@ -30,7 +30,24 @@ class Library(unittest.TestCase):
         self.assertEqual([self.status(i) for i in (1, 2, 3)], ['known', 'excluded', 'excluded'])
         client.playlists[1]['is_jingle'] = False
         sync_station(self.con, client, self.station, now=20)
-        self.assertEqual([self.status(i) for i in (2, 3)], ['pending', 'pending'])
+        self.assertEqual([self.status(i) for i in (2, 3)], ['known', 'known'])
+
+    def test_new_uploads_queue_only_when_intro_is_blank(self):
+        client = FakeClient([media(1)])
+        sync_station(self.con, client, self.station, now=10)
+        client.files[2] = media(2, intro='0')
+        client.files[3] = media(3)
+        sync_station(self.con, client, self.station, now=20)
+        self.assertEqual([self.status(i) for i in (2, 3)], ['known', 'pending'])
+
+    def test_pending_media_with_set_intro_returns_to_known(self):
+        client = FakeClient([media(1)])
+        sync_station(self.con, client, self.station, now=10)
+        client.files[2] = media(2)
+        sync_station(self.con, client, self.station, now=20)
+        client.files[2]['custom_fields']['intro_end'] = '8'
+        sync_station(self.con, client, self.station, now=30)
+        self.assertEqual(self.status(2), 'known')
 
     def test_short_or_unknown_length_is_excluded(self):
         client = FakeClient([media(1, length=59.9), media(2, length=60), media(3, length=0)])
@@ -38,7 +55,7 @@ class Library(unittest.TestCase):
         self.assertEqual([self.status(i) for i in (1, 2, 3)], ['excluded', 'known', 'excluded'])
         client.files[3] = media(3, length=180)
         sync_station(self.con, client, self.station, now=20)
-        self.assertEqual(self.status(3), 'pending')
+        self.assertEqual(self.status(3), 'known')
 
     def test_later_uploads_and_replacements_queue(self):
         client = FakeClient([media(1)])
@@ -51,7 +68,7 @@ class Library(unittest.TestCase):
         client.files[2] = media(2, mtime=5)
         sync_station(self.con, client, self.station, now=30)
         row = self.con.execute('SELECT * FROM media WHERE media_id=2').fetchone()
-        self.assertEqual((row['status'], row['sha256'], row['discovered_at']), ('pending', None, 30))
+        self.assertEqual((row['status'], row['sha256'], row['discovered_at']), ('known', None, 30))
 
     def test_removed_and_excluded_files(self):
         client = FakeClient([media(1), media(2)])

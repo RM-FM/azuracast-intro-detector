@@ -88,6 +88,33 @@ class Processing(unittest.TestCase):
         self.assertEqual(sorted(self.client.writes), [(1, 2, 14.2), (1, 3, 0.)])
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM media WHERE status='done'").fetchone()[0], 2)
 
+    def test_pending_intro_is_skipped_unless_force_is_requested(self):
+        self.cfg = make_config(self.tmp.name, Station(1, 'publish'), auto_process=False)
+        gpu = FakeGpu()
+        service = self.service(gpu, {self.sha(2): 5.})
+        self.upload(2)
+        self.client.files[2]['custom_fields']['intro_end'] = '8'
+        with self.con:
+            self.con.execute("UPDATE media SET intro_end='8' WHERE media_id=2")
+        service.request_path.write_text('now\n')
+        self.assertEqual(service.tick(), 'idle')
+        self.assertEqual(gpu.batches, [])
+        service.request_path.write_text('now\nforce\n')
+        self.assertEqual(service.tick(), 'processed 1')
+        self.assertEqual(self.client.writes, [(1, 2, 5.)])
+
+    def test_republish_force_can_replace_existing_intro(self):
+        gpu = FakeGpu()
+        service = self.service(gpu, {self.sha(2): 5.})
+        self.upload(2)
+        self.clock.now += 61
+        service.process()
+        self.client.files[2]['custom_fields']['intro_end'] = '8'
+        self.assertEqual(service.republish(1, 2), 1)
+        self.assertEqual(self.client.writes, [(1, 2, 5.)])
+        self.assertEqual(service.republish(1, 2, force=True), 1)
+        self.assertEqual(self.client.writes, [(1, 2, 5.), (1, 2, 5.)])
+
     def test_known_audio_skips_gpu(self):
         gpu = FakeGpu()
         service = self.service(gpu, {self.sha(2): 10.})

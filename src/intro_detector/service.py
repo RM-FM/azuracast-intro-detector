@@ -72,14 +72,16 @@ class Service:
                                                      value, self.clock()))
         return marker, value
 
-    def finalize(self, media, sha256):
+    def finalize(self, media, sha256, force_publish=False):
         """Decide from stored evidence and publish to AzuraCast; True when the item is done."""
         decided = self.decide(sha256)
         if decided is None:
             return False
         marker, value = decided
         station = self.cfg.station(media['station_id'])
-        state = publisher.publish(self.con, self.client, station, media['media_id'], sha256, value, self.clock())
+        state = publisher.publish(
+            self.con, self.client, station, media['media_id'], sha256, value,
+            self.clock(), force=force_publish)
         with self.con:
             self.con.execute("UPDATE media SET status='done', error=NULL, updated_at=? WHERE station_id=? AND media_id=?",
                              (self.clock(), media['station_id'], media['media_id']))
@@ -87,13 +89,15 @@ class Service:
                  marker.get('intro_type') or marker.get('intro_reason'), value, state)
         return True
 
-    def republish(self, station_id, media_id=None):
+    def republish(self, station_id, media_id=None, force=False):
         query = "SELECT * FROM media WHERE station_id=? AND status='done' AND sha256 IS NOT NULL"
         args = [station_id]
         if media_id is not None:
             query += ' AND media_id=?'
             args.append(media_id)
-        return sum(self.finalize(m, m['sha256']) for m in self.con.execute(query, args).fetchall())
+        return sum(
+            self.finalize(m, m['sha256'], force_publish=force)
+            for m in self.con.execute(query, args).fetchall())
 
     def _failed(self, media, error):
         attempts = media['attempts'] + 1
@@ -114,15 +118,17 @@ class Service:
             except AzuraCastError as error:
                 log.error('Station %s sync failed: %s', station.id, error)
 
-    def ready(self, force=False):
-        """Pending items, or [] while new uploads are still arriving (batch them) unless forced."""
+    def ready(self, force=False, force_publish=False):
+        """Ready blank-cue items by default; force_publish admits cue-set items."""
         active = tuple(s.id for s in self.stations() if s.mode != 'off')
         if not active:
             return []
-        rows = self.con.execute(
-            f"SELECT * FROM media WHERE status='pending' AND station_id IN ({','.join('?' * len(active))}) "
-            'ORDER BY priority, discovered_at, station_id, media_id LIMIT ?',
-            (*active, self.cfg.batch_max_songs)).fetchall()
+        query = "SELECT * FROM media WHERE status='pending'"
+        if not force_publish:
+            query += ' AND intro_end IS NULL'
+        query += f" AND station_id IN ({','.join('?' * len(active))}) "
+        rows = self.con.execute(query + 'ORDER BY priority, discovered_at, station_id, media_id LIMIT ?',
+                                 (*active, self.cfg.batch_max_songs)).fetchall()
         if (not force and rows and len(rows) < self.cfg.batch_max_songs and all(r['priority'] == 0 for r in rows)
                 and self.clock() - max(r['discovered_at'] for r in rows) < self.cfg.batch_quiet_seconds):
             return []
@@ -132,10 +138,10 @@ class Service:
     def request_path(self):
         return self.cfg.data_dir / PROCESS_REQUEST
 
-    def process(self, force=False):
+    def process(self, force=False, force_publish=False):
         if self.clock() < self.retry_at:
             return 'waiting for GPU retry'
-        rows = self.ready(force)
+        rows = self.ready(force, force_publish)
         if not rows:
             return 'idle'
         batch = self.cfg.data_dir / 'work' / uuid.uuid4().hex
@@ -154,25 +160,25 @@ class Service:
                                      (sha256, self.clock(), media['station_id'], media['media_id']))
                 if self.con.execute('SELECT 1 FROM analyses WHERE sha256=?', (sha256,)).fetchone():
                     path.unlink(missing_ok=True)
-                    self._finish(media, sha256)
+                    self._finish(media, sha256, force_publish)
                 else:
                     waiting.setdefault(sha256, []).append(media)
             if waiting:
-                self._analyze(waiting, songs, batch / 'reports')
+                self._analyze(waiting, songs, batch / 'reports', force_publish)
             return f'processed {len(rows)}'
         finally:
             shutil.rmtree(batch, ignore_errors=True)
 
-    def _finish(self, media, sha256):
+    def _finish(self, media, sha256, force_publish=False):
         try:
-            self.finalize(media, sha256)
+            self.finalize(media, sha256, force_publish=force_publish)
         except AzuraCastError as error:
             self._failed(media, f'publish: {error}')
         except Exception as error:
             log.exception('Decision failed for %s', sha256)
             self._failed(media, f'decision: {error!r}')
 
-    def _analyze(self, waiting, songs, reports):
+    def _analyze(self, waiting, songs, reports, force_publish=False):
         run_id = reports.parent.name
         started = self.clock()
         with self.con:
@@ -207,7 +213,7 @@ class Service:
         for sha256, items in waiting.items():
             for media in items:
                 if sha256 in complete:
-                    self._finish(media, sha256)
+                    self._finish(media, sha256, force_publish)
                 else:
                     self._failed(media, 'incomplete evidence: ' + '; '.join(failed[sha256])[:1500])
 
@@ -216,7 +222,9 @@ class Service:
         requested = self.request_path.exists()
         if not (self.cfg.auto_process or requested):
             return 'manual processing; nothing requested'
-        result = self.process(force=requested)
+        request = self.request_path.read_text().splitlines() if requested else []
+        force_publish = len(request) > 1 and request[1] == 'force'
+        result = self.process(force=requested, force_publish=force_publish)
         if requested and result == 'idle':
             self.request_path.unlink(missing_ok=True)
             log.info('Requested processing finished: queue is empty')

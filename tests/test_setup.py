@@ -33,6 +33,19 @@ class SetupConfiguration(unittest.TestCase):
         self.assertNotIn('azura-test', (self.root / 'config.toml').read_text())
         self.assertEqual(inspect(self.root), ('https://radio.example', True, True))
 
+    def test_setup_defaults_a_bare_host_to_https(self):
+        prepare(self.root, 'radio.example', 'azura-test', 'runpod-test')
+        cfg = load(self.root / 'config.toml', environ={'AZURACAST_API_KEY': 'azura-test'})
+        self.assertEqual(cfg.base_url, 'https://radio.example')
+
+    def test_setup_allows_http_only_with_private_network_opt_in(self):
+        example = self.root / 'config.example.toml'
+        example.write_text(example.read_text().replace(
+            '[azuracast]', '[azuracast]\nallow_http = true', 1))
+        prepare(self.root, 'http://radio.example', 'azura-test', 'runpod-test')
+        cfg = load(self.root / 'config.toml', environ={'AZURACAST_API_KEY': 'azura-test'})
+        self.assertEqual(cfg.base_url, 'http://radio.example')
+
     def test_update_preserves_advanced_settings_budget_and_existing_keys(self):
         prepare(self.root, 'https://radio.example', 'azura-test', 'runpod-test')
         path = self.root / 'config.toml'

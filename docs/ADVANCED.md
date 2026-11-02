@@ -125,9 +125,11 @@ global administrator key merely to resolve missing station permissions.
 | `batch_max_songs` | `100` | Maximum originals per batch |
 | `max_attempts` | `2` | Retry limit for failures |
 
-First discovery records the existing library without queuing it all. New or replaced
-files are queued later. `backfill` queues existing unknown intros at lower priority.
-`process` handles the entire pending queue; it is not a per-station processing command.
+First discovery records the existing library without queuing it all. Later, only new
+media IDs with a blank `intro_end` are queued automatically; changes to existing media
+are recorded but not automatically reanalyzed. `backfill` queues existing blank intros
+at lower priority. `process` handles the entire pending blank-cue queue; it is not a
+per-station processing command.
 
 ### Decision settings
 
@@ -268,9 +270,12 @@ docker compose exec detector intro-detector retry --station 1
 docker compose exec detector intro-detector pod status
 ```
 
-`backfill --include-set` also considers already tagged files; use deliberately.
-`retry` requeues failures. `process` may create a paid GPU worker. Status and decisions
-are service data, not proof that station playback has been validated.
+`backfill --include-set` also considers already tagged files; use deliberately. Pair it
+with `process --force` only when intentionally replacing existing cues. For completed
+analyses, `republish --force` uses stored evidence and permits replacement only in
+`publish` mode; it does not rescan audio. `retry` requeues failures. `process` may create
+a paid GPU worker. Status and decisions are service data, not proof that station playback
+has been validated.
 
 Review storage belongs to this detector, not to the Sweepers plugin. Reviews bind to
 the audio hash. `instrumental` confirms the first 30 seconds contain no vocals and

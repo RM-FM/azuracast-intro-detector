@@ -49,14 +49,14 @@ def _record(con, station_id, media_id, sha256, state, value, now):
                 (station_id, media_id, sha256, POLICY, value, state, now))
 
 
-def publish(con, client, station, media_id, sha256, value, now=None):
-    """Never overwrite a value that this service did not write itself."""
+def publish(con, client, station, media_id, sha256, value, now=None, force=False):
+    """Preserve manual values unless an explicit force is requested."""
     now = time.time() if now is None else now
     last = con.execute('SELECT * FROM publications WHERE station_id=? AND media_id=?',
                        (station.id, media_id)).fetchone()
     if station.mode == 'off':
         return 'off'
-    if last is not None and last['state'] == 'manual':
+    if last is not None and last['state'] == 'manual' and not force:
         return 'manual'
     if value is None:
         with con:
@@ -70,8 +70,8 @@ def publish(con, client, station, media_id, sha256, value, now=None):
     current = parse(current_raw)
     ours = last is not None and last['state'] == 'written'
     with con:
-        # Someone else set, changed or cleared the field: their decision wins.
-        if (ours and not same(current, last['value'])) or (not ours and current is not None):
+        # Without force, someone else's value takes precedence.
+        if not force and ((ours and not same(current, last['value'])) or (not ours and current is not None)):
             state = 'matching' if not ours and same(current, value) else 'manual'
             _record(con, station.id, media_id, sha256, state, current if state == 'manual' else value, now)
             if state == 'manual':

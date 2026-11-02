@@ -36,6 +36,9 @@ def worker_image(root):
 def prepare(root, url, azura_key, runpod_key):
     root = Path(root)
     config_path, env_path = root / 'config.toml', root / '.env'
+    url = url.strip()
+    if url and '://' not in url:
+        url = f'https://{url}'
     for path in (config_path, env_path, root / 'config.example.toml'):
         if path.is_symlink():
             raise ValueError('Configuration files must not be symlinks')
