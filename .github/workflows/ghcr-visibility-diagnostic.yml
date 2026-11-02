@@ -1,0 +1,49 @@
+name: GHCR visibility diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  visibility:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the configured visibility token and make the worker package public
+        env:
+          VISIBILITY_TOKEN: ${{ secrets.GHCR_VISIBILITY_TOKEN }}
+          EXPECTED_OWNER: ${{ github.repository_owner }}
+          PACKAGE_NAME: azuracast-intro-detector-gpu
+        run: |
+          test -n "$VISIBILITY_TOKEN"
+          headers="$RUNNER_TEMP/visibility-token.headers"
+          response="$RUNNER_TEMP/visibility-token-user.json"
+          status=$(curl --silent --show-error --output "$response" --dump-header "$headers" \
+            --write-out '%{http_code}' \
+            -H "Authorization: Bearer $VISIBILITY_TOKEN" \
+            -H 'Accept: application/vnd.github+json' "$GITHUB_API_URL/user")
+          test "$status" = 200 || { echo "Token identity request returned HTTP $status."; exit 1; }
+          owner=$(jq -r '.login' "$response")
+          scopes=$(grep -i '^x-oauth-scopes:' "$headers" | head -n 1 | cut -d: -f2- | tr -d '\r' | xargs || true)
+          permissions=$(grep -i '^x-accepted-github-permissions:' "$headers" | head -n 1 | cut -d: -f2- | tr -d '\r' | xargs || true)
+          {
+            printf 'Authenticated account: %s\n' "$owner"
+            printf 'Classic-token scopes: %s\n' "${scopes:-not reported}"
+            printf 'Accepted permissions: %s\n' "${permissions:-not reported}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "${owner,,}" = "${EXPECTED_OWNER,,}"
+          api="$GITHUB_API_URL/user/packages/container/$PACKAGE_NAME/visibility"
+          status=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+            --request PATCH -H "Authorization: Bearer $VISIBILITY_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode visibility=public "$api")
+          if [[ "$status" != 200 ]]; then
+            printf 'Visibility API returned HTTP %s: ' "$status" >&2
+            jq -c '{message,status,documentation_url}' "$response" >&2 || true
+            exit 1
+          fi
+          visibility=$(jq -r '.visibility // empty' "$response")
+          test "$visibility" = public
+          printf 'Worker package visibility: %s\n' "$visibility" >> "$GITHUB_STEP_SUMMARY"
