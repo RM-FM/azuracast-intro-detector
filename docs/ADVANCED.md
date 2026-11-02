@@ -371,6 +371,18 @@ must also pass the requirements in [LICENSES.md](LICENSES.md).
 
 ## Maintainer release preparation
 
+### Service-only release
+
+For changes confined to the detector service, such as selector updates, do not rebuild
+the GPU worker image. Keep the existing public `v1` worker. Create a draft release on
+the exact `main` commit with a `vMAJOR.MINOR.PATCH` tag matching `pyproject.toml` and
+include `GPU WORKER IMAGE: UNCHANGED` in the release notes. Publishing runs the source
+release checks: tag/version and `main` ancestry validation, unit tests, and an
+anonymous pull of the existing `v1` worker. The service image is rebuilt locally by
+`bin/setup.sh` when the detector is updated. Keep shadow mode enabled until the
+required detection comparisons are complete; run `decision-diff` before replacing
+stored or published decisions.
+
 Complete worker preparation before presenting a release as installable:
 
 1. Build [gpu/Dockerfile](../gpu/Dockerfile) through the **GPU image** workflow.
@@ -387,7 +399,7 @@ Complete worker preparation before presenting a release as installable:
   NVIDIA terms and model notices before approving redistribution.
 5. Create a draft GitHub Release on the `main` commit with a `vMAJOR.MINOR.PATCH` tag
   matching `pyproject.toml`. Add `REDISTRIBUTION REVIEWED: APPROVED` to its body only
-  after that review. Keep the release as a draft.
+  after that review, and include `GPU WORKER IMAGE: UPDATED`. Keep the release as a draft.
 6. Dispatch **GPU image** again from the exact release tag ref, with the same tag,
   base-image digest and source URL. This fixes the publish build to the commit used by
   the candidate. Set `publish=true`, `generate_source_bundle=true`,

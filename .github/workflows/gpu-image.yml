@@ -385,9 +385,35 @@ jobs:
             release-evidence.md
             manifest.json
 
-  release-verify:
+  release-kind:
     needs: [tests]
     if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name }}
+      - name: Validate release type and source revision
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          WORKER_RELEASE: "${{ contains(github.event.release.body, 'GPU WORKER IMAGE: UPDATED') }}"
+          SOURCE_ONLY_RELEASE: "${{ contains(github.event.release.body, 'GPU WORKER IMAGE: UNCHANGED') }}"
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$WORKER_RELEASE" != "$SOURCE_ONLY_RELEASE"
+          project_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          test "${TAG#v}" = "$project_version"
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+
+  release-verify:
+    needs: [tests, release-kind]
+    if: >-
+      github.event_name == 'release' &&
+      contains(github.event.release.body, 'GPU WORKER IMAGE: UPDATED')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -424,3 +450,21 @@ jobs:
           docker --config "$public_config" manifest inspect "$IMAGE:v1" >/dev/null
           docker --config "$public_config" pull "$IMAGE:v1"
           docker image inspect "$IMAGE:v1" --format '{{json .RepoDigests}}' | grep -F "$IMAGE@$digest"
+
+  source-release-verify:
+    needs: [tests, release-kind]
+    if: >-
+      github.event_name == 'release' &&
+      contains(github.event.release.body, 'GPU WORKER IMAGE: UNCHANGED')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify the existing worker image is available anonymously
+        env:
+          IMAGE: ghcr.io/rm-fm/azuracast-intro-detector-gpu
+        run: |
+          public_config=$(mktemp -d)
+          trap 'rm -rf "$public_config"' EXIT
+          docker --config "$public_config" manifest inspect "$IMAGE:v1" >/dev/null
+          docker --config "$public_config" pull "$IMAGE:v1"
