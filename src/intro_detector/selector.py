@@ -213,29 +213,33 @@ def _smad_singing_support(report_row, cue):
                                             smad.get('probabilities') or []))
 
 
+def _stem_phrase_agrees(report_row, cue):
+    phrases = []
+    for variant in ('demucs', 'melband'):
+        result = (report_row or {}).get('asr', {}).get(f'{variant}/turbo') or {}
+        if _unreliable_lead_asr(result):
+            return False
+        phrase = []
+        for word in (result.get('words') or [])[:8]:
+            start = word.get('start_original', word.get('start'))
+            token = ' '.join(re.findall(r'[^\W_]+', str(word.get('word') or '').casefold()))
+            if _number(start) and cue - .75 <= start <= cue + 8 and token:
+                phrase.append((start, token))
+        phrases.append(phrase)
+    shared = {token for start, token in phrases[0] for other_start, other_token in phrases[1]
+              if token == other_token and abs(start - other_start) <= .75}
+    return len(shared) >= 3
+
+
 def _lead_vocal_anchor(row, events, report_row=None):
     if not events:
         return None, 0
-    smad = row.get('smad') or {}
-    order = smad.get('class_order') or []
-    starts, probabilities = smad.get('window_starts') or [], smad.get('probabilities') or []
-    window_seconds = smad.get('window_seconds', 4.0)
-    try:
-        singing_index = order.index('singing_music')
-    except ValueError:
-        singing_index = None
-
     for cue, _ in sorted(events):
         cluster = [(time, variant) for time, variant in events if abs(time - cue) <= .75]
         variants = {variant for _, variant in cluster}
-        singing_support = singing_index is not None and any(
-            start <= cue + .25 and start + window_seconds >= cue - .25
-            and len(probability) > singing_index and probability[singing_index] >= .5
-            for start, probability in zip(starts, probabilities))
-        early_lyric_support = (cue < 1.0 and len(_early_lyric_variants(report_row)) >= 2
-                               and singing_support)
-        acoustic_support = False
-        for variant in variants:
+        singing_support = _smad_singing_support(report_row, cue)
+        peaks = {variant: 0. for variant in INPUTS}
+        for variant in INPUTS:
             for context in (4, 8):
                 acoustic = row.get('acoustic', {}).get(f'{variant}/{context}') or {}
                 step = acoustic.get('frame_seconds')
@@ -244,13 +248,15 @@ def _lead_vocal_anchor(row, events, report_row=None):
                     continue
                 first = max(0, int((cue - .25) / step))
                 last = min(len(curve), int((cue + .75) / step) + 1)
-                if last > first and max(curve[first:last]) >= .1:
-                    acoustic_support = True
-                    break
-            if acoustic_support:
-                break
+                if last > first:
+                    peaks[variant] = max(peaks[variant], max(curve[first:last]))
+        acoustic_support = any(peaks[variant] >= .1 for variant in variants)
+        unanimous = variants == set(INPUTS) and min(peaks['demucs'], peaks['melband']) >= .05
+        stem_pair = {'demucs', 'melband'} <= variants and (peaks['original'] >= .05 or singing_support)
+        phrase_support = (unanimous or stem_pair) and _stem_phrase_agrees(report_row, cue)
+        early_lyric_support = cue < 1.0 and len(_early_lyric_variants(report_row)) >= 2 and singing_support
         corroborated = ((acoustic_support and len(variants) >= 2)
-                        or (singing_support and len(variants) >= 3) or early_lyric_support)
+                        or (singing_support and len(variants) >= 3) or phrase_support or early_lyric_support)
         if corroborated:
             return min(time for time, _ in cluster), len(variants)
     return None, 0
