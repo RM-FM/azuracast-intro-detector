@@ -26,8 +26,10 @@ are alternatives for custom deployments, not tasks every operator must perform.
 
 Setup builds the service image locally and checks the repository-provided public
 worker image using registry metadata, without downloading the full image or starting
-a Pod. It does not run a backfill, start processing, or change AzuraCast broadcasting. First installation
-uses all visible stations, shadow mode and `auto_process = false`.
+a Pod. It does not run a backfill or change AzuraCast broadcasting. First installation
+uses all visible stations, shadow mode and `auto_process = true`. The initial sync only
+records existing media; automatic processing applies to later eligible new media with a
+blank `intro_end` and may incur GPU charges.
 
 On updates, the default answer keeps all existing configuration bytes and keys.
 Choosing to reconfigure changes only the host and entered keys; blank key answers
@@ -119,15 +121,17 @@ global administrator key merely to resolve missing station permissions.
 
 | `[scan]` setting | Service default | Meaning |
 | --- | --- | --- |
-| `auto_process` | `true` | Analyze newly queued files automatically; setup initially writes `false` |
+| `auto_process` | `true` | Analyze newly queued files automatically; first setup enables it |
 | `poll_seconds` | `300` | Library discovery interval |
 | `batch_quiet_seconds` | `120` | Wait after the last new upload before starting a batch |
 | `batch_max_songs` | `100` | Maximum originals per batch |
 | `max_attempts` | `2` | Retry limit for failures |
 
-First discovery records the existing library without queuing it all. New or replaced
-files are queued later. `backfill` queues existing unknown intros at lower priority.
-`process` handles the entire pending queue; it is not a per-station processing command.
+First discovery records the existing library without queuing it all. Later, only new
+media IDs with a blank `intro_end` are queued automatically; changes to existing media
+are recorded but not automatically reanalyzed. `backfill` queues existing blank intros
+at lower priority. `process` handles the entire pending blank-cue queue; it is not a
+per-station processing command.
 
 ### Decision settings
 
@@ -166,9 +170,9 @@ docker compose exec detector intro-detector republish --station 1
 The dry-run report lists proposed changes. `republish` uses stored analyses and does
 not create a GPU worker. Check results before applying them.
 
-Set `[scan] auto_process = true` only when new uploads may incur GPU charges
-automatically. This setting is independent of station publishing mode: shadow-mode
-analysis still costs money when it needs a GPU.
+Set `[scan] auto_process = false` when uploads should wait for a manual `process`
+request. This setting is independent of station publishing mode: shadow-mode analysis
+still costs money when it needs a GPU.
 
 ## Automatic GPU workers
 
@@ -268,9 +272,12 @@ docker compose exec detector intro-detector retry --station 1
 docker compose exec detector intro-detector pod status
 ```
 
-`backfill --include-set` also considers already tagged files; use deliberately.
-`retry` requeues failures. `process` may create a paid GPU worker. Status and decisions
-are service data, not proof that station playback has been validated.
+`backfill --include-set` also considers already tagged files; use deliberately. Pair it
+with `process --force` only when intentionally replacing existing cues. For completed
+analyses, `republish --force` uses stored evidence and permits replacement only in
+`publish` mode; it does not rescan audio. `retry` requeues failures. `process` may create
+a paid GPU worker. Status and decisions are service data, not proof that station playback
+has been validated.
 
 Review storage belongs to this detector, not to the Sweepers plugin. Reviews bind to
 the audio hash. `instrumental` confirms the first 30 seconds contain no vocals and

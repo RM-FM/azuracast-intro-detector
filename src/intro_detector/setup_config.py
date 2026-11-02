@@ -36,6 +36,9 @@ def worker_image(root):
 def prepare(root, url, azura_key, runpod_key):
     root = Path(root)
     config_path, env_path = root / 'config.toml', root / '.env'
+    url = url.strip()
+    if url and '://' not in url:
+        url = f'https://{url}'
     for path in (config_path, env_path, root / 'config.example.toml'):
         if path.is_symlink():
             raise ValueError('Configuration files must not be symlinks')
@@ -49,7 +52,7 @@ def prepare(root, url, azura_key, runpod_key):
     document.setdefault('azuracast', tomlkit.table())['base_url'] = url.rstrip('/')
     if not config_path.exists():
         document.setdefault('station_defaults', tomlkit.table())['mode'] = 'shadow'
-        document.setdefault('scan', tomlkit.table())['auto_process'] = False
+        document.setdefault('scan', tomlkit.table())['auto_process'] = True
     with tempfile.TemporaryDirectory(prefix='.setup-', dir=root) as directory:
         temporary = Path(directory)
         candidate = temporary / 'config.toml'

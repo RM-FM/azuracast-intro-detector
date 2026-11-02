@@ -89,13 +89,17 @@ def cmd_process(args):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             # The running service owns the queue: hand it the request instead.
-            service.request_path.write_text(f'{time.time()}\n')
-            pending = service.con.execute("SELECT COUNT(*) FROM media WHERE status='pending'").fetchone()[0]
-            print(f'Requested: the running service will process all {pending} pending songs '
+            request = f'{time.time()}\n' + ('force\n' if args.force else '')
+            service.request_path.write_text(request)
+            query = "SELECT COUNT(*) FROM media WHERE status='pending'"
+            if not args.force:
+                query += ' AND intro_end IS NULL'
+            pending = service.con.execute(query).fetchone()[0]
+            print(f'Requested: the running service will process {pending} pending songs '
                   '(watch "docker compose logs -f detector")')
             return
         service.sync()
-        print(service.process(force=True))
+        print(service.process(force=True, force_publish=args.force))
 
 
 def cmd_status(args):
@@ -242,7 +246,7 @@ def cmd_unlock(args):
 
 
 def cmd_republish(args):
-    print(f'Re-published {_service(args).republish(args.station, args.media)} media')
+    print(f'Re-published {_service(args).republish(args.station, args.media, force=args.force)} media')
 
 
 def cmd_pod(args):
@@ -310,8 +314,10 @@ def main(argv=None):
     sub.add_parser('health', help='Check local service ownership and database readiness'
                    ).set_defaults(func=cmd_health)
     sub.add_parser('sync', help='Sync AzuraCast libraries once').set_defaults(func=cmd_sync)
-    sub.add_parser('process', help='Process all pending songs now (asks the running service if there is one)'
-                   ).set_defaults(func=cmd_process)
+    p = sub.add_parser('process', help='Process pending songs now (asks the running service if there is one)')
+    p.add_argument('--force', action='store_true',
+                   help='Include songs with an intro and allow replacing it (only when station mode is publish)')
+    p.set_defaults(func=cmd_process)
     sub.add_parser('status', help='Queue, runs and GPU spend').set_defaults(func=cmd_status)
     sub.add_parser('check', help='Check configuration, AzuraCast permissions and Runpod access'
                    ).set_defaults(func=cmd_check)
@@ -362,6 +368,8 @@ def main(argv=None):
     p = sub.add_parser('republish', help='Re-decide and publish analyzed songs (e.g. after shadow -> publish)')
     p.add_argument('--station', type=int, required=True)
     p.add_argument('--media', type=int)
+    p.add_argument('--force', action='store_true',
+                   help='Allow replacing an existing intro_end (only when station mode is publish)')
     p.set_defaults(func=cmd_republish)
     p = sub.add_parser('pod', help='Inspect or retire the GPU worker')
     p.add_argument('action', choices=('status', 'stop', 'delete'))

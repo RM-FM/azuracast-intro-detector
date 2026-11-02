@@ -55,11 +55,13 @@ class Publish(unittest.TestCase):
         self.con.close()
         self.tmp.cleanup()
 
-    def publish(self, value, station=None):
-        return publisher.publish(self.con, self.client, station or self.station, 5, 'sha', value, now=1)
+    def publish(self, value, station=None, force=False):
+        return publisher.publish(self.con, self.client, station or self.station, 5, 'sha', value,
+                                 now=1, force=force)
 
     def test_shadow_and_off_never_write(self):
         self.assertEqual(self.publish(10., Station(1, 'shadow')), 'planned')
+        self.assertEqual(self.publish(10., Station(1, 'shadow'), force=True), 'planned')
         self.assertEqual(self.publish(10., Station(1, 'off')), 'off')
         self.assertEqual(self.client.writes, [])
 
@@ -75,6 +77,12 @@ class Publish(unittest.TestCase):
         self.client.files[5]['custom_fields']['intro_end'] = ''
         self.assertEqual(self.publish(10.), 'manual')
         self.assertEqual(self.client.writes, [])
+
+    def test_force_overwrites_manual_value(self):
+        self.client.files[5]['custom_fields']['intro_end'] = '8'
+        self.assertEqual(self.publish(10.), 'manual')
+        self.assertEqual(self.publish(10., force=True), 'written')
+        self.assertEqual(self.client.writes, [(1, 5, 10.)])
 
     def test_edit_or_clear_after_our_write_becomes_manual(self):
         self.publish(10.)

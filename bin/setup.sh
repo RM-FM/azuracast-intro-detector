@@ -111,9 +111,9 @@ chmod 600 secrets/runpod-ssh-key
 status 'Checking configuration and API permissions...\n'
 docker compose config --quiet
 docker compose run --rm --no-deps detector check
-status 'Starting/updating the detector. AzuraCast broadcasting is not restarted...\n'
+status 'Starting/updating the detector...\n'
 docker compose up -d --no-build --no-deps --force-recreate --wait --wait-timeout 90 detector
 docker compose exec -T detector intro-detector status
 status '\nDetector installed/updated. Existing settings and stored analyses are kept.\n'
-status 'First installation uses shadow mode and manual processing.\n'
+status 'First installation uses shadow mode and automatically processes eligible new songs; existing songs are not backfilled.\n'
 status 'Follow First station setup in README.md for a controlled sample scan.\n'

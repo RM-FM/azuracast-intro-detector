@@ -24,7 +24,7 @@ def jingle_playlists(client, station_id):
 
 
 def sync_station(con, client, station, now=None):
-    """New files after the first sync queue automatically; the first sync only records the library."""
+    """The first sync records the library; later unmarked media IDs enter the queue."""
     now = time.time() if now is None else now
     skip = set(station.exclude_playlists) | jingle_playlists(client, station.id)
     items = client.list_files(station.id)
@@ -47,7 +47,8 @@ def sync_station(con, client, station, now=None):
             old = con.execute('SELECT * FROM media WHERE station_id=? AND media_id=?',
                               (station.id, media_id)).fetchone()
             if old is None:
-                status = 'excluded' if excluded else 'pending' if initialized else 'known'
+                status = 'excluded' if excluded else (
+                    'pending' if initialized and fields['intro_end'] is None else 'known')
                 con.execute('INSERT INTO media(station_id, media_id, unique_id, path, mtime, length, playlists, '
                             'intro_end, status, discovered_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                             (station.id, media_id, *fields.values(), status, now, now))
@@ -57,9 +58,13 @@ def sync_station(con, client, station, now=None):
             status, extra = old['status'], {}
             if excluded:
                 status = 'excluded'
-            elif old['status'] in ('excluded', 'deleted') or (changed and old['status'] != 'known'):
-                # A replaced or newly eligible file is analyzed again; its hash decides reuse.
-                status, extra = 'pending', dict(sha256=None, attempts=0, priority=0, error=None, discovered_at=now)
+            elif changed:
+                status = 'pending' if old['status'] == 'pending' and fields['intro_end'] is None else 'known'
+                extra = dict(sha256=None, attempts=0, priority=0, error=None, discovered_at=now)
+            elif fields['intro_end'] is not None and old['status'] in ('pending', 'failed'):
+                status = 'known'
+            elif old['status'] in ('excluded', 'deleted'):
+                status = 'known'
             if status != old['status']:
                 counts[status] += 1
             values = {**fields, **extra, 'status': status, 'updated_at': now}

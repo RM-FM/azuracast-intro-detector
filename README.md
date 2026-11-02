@@ -46,12 +46,18 @@ cd /opt/azuracast-intro-detector
 sudo bash bin/setup.sh
 ```
 
-The script asks for the AzuraCast HTTPS address and both API keys. It builds the
-service, verifies the worker image, prepares configuration, generates the worker SSH key,
-checks API access and waits for a healthy detector. API key prompts do not display the keys.
+The script asks for the AzuraCast address and both API keys. Enter a hostname with or
+without `https://`; a hostname without a scheme defaults to HTTPS. Plain HTTP is rejected
+unless `allow_http = true` is explicitly configured for a private Docker network. The
+script builds the service, verifies the worker image, prepares configuration, generates
+the worker SSH key, checks API access and waits for a healthy detector. API key prompts
+do not display the keys.
 
-Initial setup selects all stations visible to the API user, shadow mode and manual
-processing. It does not scan the existing library or start a paid GPU worker.
+Initial setup selects all stations visible to the API user, shadow mode and automatic
+processing. Its first sync inventories the existing library without queuing it for
+analysis; only later eligible new tracks with a blank `intro_end` are processed
+automatically. This may incur GPU charges. Setup does not start a GPU worker unless
+there is queued work.
 
 Continue with [First station setup](#first-station-setup).
 Other options are in [manual installation](docs/ADVANCED.md#manual-installation).

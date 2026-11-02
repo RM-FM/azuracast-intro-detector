@@ -1,9 +1,10 @@
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from helpers import database, make_config, tempdir
+from intro_detector import cli
 from intro_detector.cli import _owner, cmd_health
 
 
@@ -65,6 +66,27 @@ class Health(unittest.TestCase):
         with patch('intro_detector.cli.config_module.load', side_effect=ValueError('private-value')):
             with self.assertRaisesRegex(SystemExit, '^Unhealthy: configuration or service database is unavailable$'):
                 cmd_health(SimpleNamespace(config=None))
+
+
+class ForcedUpdates(unittest.TestCase):
+    def test_process_force_is_forwarded_to_service(self):
+        with tempdir() as tmp:
+            data_dir = Path(tmp) / 'data'
+            service = SimpleNamespace(
+                cfg=SimpleNamespace(data_dir=data_dir),
+                request_path=data_dir / '.process-request',
+                sync=Mock(),
+                process=Mock(return_value='processed 0'))
+            with patch('intro_detector.cli._service', return_value=service):
+                cli.main(['process', '--force'])
+            service.sync.assert_called_once_with()
+            service.process.assert_called_once_with(force=True, force_publish=True)
+
+    def test_republish_force_is_forwarded_to_service(self):
+        service = SimpleNamespace(republish=Mock(return_value=1))
+        with patch('intro_detector.cli._service', return_value=service):
+            cli.main(['republish', '--station', '1', '--force'])
+        service.republish.assert_called_once_with(1, None, force=True)
 
 
 if __name__ == '__main__':
