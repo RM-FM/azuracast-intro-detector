@@ -37,9 +37,12 @@ class StationSettingsStore(unittest.TestCase):
                          ('shadow', (2, 9), 12.))
         self.assertEqual(self.store.get(3), settings)
         for bad in ({'mode': 'off'}, {'enabled': 1}, {'budget_usd': -1}, {'exclude_playlists': ['x']},
-                    {'min_song_seconds': float('nan')}, {'billing': 'shared'}):
+                    {'min_song_seconds': float('nan')}, {'billing': 'shared'}, {'max_song_seconds': 30},
+                    {'max_song_seconds': -1}):
             with self.assertRaises(ValueError):
                 self.store.update(3, bad)
+        self.assertEqual(self.store.get(3).max_song_seconds, 900.)
+        self.assertEqual(self.store.update(3, {'max_song_seconds': 0}).station.max_song_seconds, 0.)
 
     def test_markers(self):
         instance = Instance(self.con)
@@ -117,7 +120,7 @@ class Migration(unittest.TestCase):
                              "exclude_playlists TEXT NOT NULL DEFAULT '[]', billing TEXT NOT NULL DEFAULT 'own', "
                              'budget_usd REAL NOT NULL, shared_allowed INTEGER NOT NULL DEFAULT 0, '
                              'shared_cap_usd REAL NOT NULL DEFAULT 0, auto_process INTEGER NOT NULL DEFAULT 1, '
-                             'updated_at REAL NOT NULL)')
+                             'updated_at REAL NOT NULL, max_song_seconds REAL NOT NULL DEFAULT 900)')
             self.con.executemany('INSERT INTO station_settings(station_id, enabled, min_song_seconds, billing, '
                                  'budget_usd, updated_at) VALUES(?, 1, 60, ?, 10, 0)',
                                  [(1, 'shared'), (2, 'shared'), (3, 'own'), (4, 'own')])

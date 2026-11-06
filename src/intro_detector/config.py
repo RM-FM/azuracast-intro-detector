@@ -19,6 +19,8 @@ class Station:
     mode: str = 'shadow'
     exclude_playlists: tuple = ()
     min_song_seconds: float = 60.0
+    # 0 means no maximum.
+    max_song_seconds: float = 900.0
 
 
 @dataclass(frozen=True)

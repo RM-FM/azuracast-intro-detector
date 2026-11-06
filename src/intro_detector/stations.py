@@ -103,13 +103,16 @@ class StationSettings:
     # False: new songs wait for "Process now".
     auto_process: bool = True
     min_song_seconds: float = 60.0
+    # Longer files, such as DJ mixes, are skipped; 0 means no maximum.
+    max_song_seconds: float = 900.0
     exclude_playlists: tuple = ()
     # Estimated GPU spend of this station per UTC month; 0 disables the limit.
     budget_usd: float = 10.0
 
     @property
     def station(self):
-        return Station(self.id, self.mode if self.enabled else 'off', self.exclude_playlists, self.min_song_seconds)
+        return Station(self.id, self.mode if self.enabled else 'off', self.exclude_playlists, self.min_song_seconds,
+                       self.max_song_seconds)
 
     def public(self):
         return {**asdict(self), 'exclude_playlists': list(self.exclude_playlists)}
@@ -130,11 +133,16 @@ def _validated(settings, changes):
         raise ValueError(f'mode must be one of {STATION_MODES}')
     if 'min_song_seconds' in values:
         values['min_song_seconds'] = _number('min_song_seconds', values['min_song_seconds'], 0, 3600)
+    if 'max_song_seconds' in values:
+        values['max_song_seconds'] = _number('max_song_seconds', values['max_song_seconds'], 0, 86400)
     if 'exclude_playlists' in values:
         values['exclude_playlists'] = _playlists(values['exclude_playlists'])
     if 'budget_usd' in values:
         values['budget_usd'] = _number('budget_usd', values['budget_usd'], 0, MAX_USD)
-    return replace(settings, **values)
+    updated = replace(settings, **values)
+    if updated.max_song_seconds and updated.max_song_seconds <= updated.min_song_seconds:
+        raise ValueError('max_song_seconds must be above min_song_seconds, or 0 for no maximum')
+    return updated
 
 
 class Stations:

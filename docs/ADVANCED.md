@@ -127,6 +127,7 @@ or with `intro-detector station set`. Settings per station:
 | `mode` | `[station_defaults] mode` | `shadow` (propose only) or `publish` |
 | `auto_process` | `[scan] auto_process` | Analyze new uploads without "Process now" |
 | `min_song_seconds` | `[station_defaults]`, `60` | Skip shorter files and files of unknown length |
+| `max_song_seconds` | `900` | Skip longer files, such as DJ mixes; `0` means no maximum |
 | `exclude_playlists` | `[station_defaults]`, `[]` | Additional playlist IDs excluded from analysis |
 | `budget_usd` | `[runpod] monthly_budget_usd`, `10` | Monthly GPU budget of the station; `0` means none |
 

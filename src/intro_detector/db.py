@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS station_settings(
   enabled INTEGER NOT NULL DEFAULT 0,
   mode TEXT NOT NULL DEFAULT 'shadow',
   min_song_seconds REAL NOT NULL,
+  max_song_seconds REAL NOT NULL DEFAULT 900,
   exclude_playlists TEXT NOT NULL DEFAULT '[]',
   budget_usd REAL NOT NULL,
   auto_process INTEGER NOT NULL DEFAULT 1,
@@ -122,7 +123,8 @@ CREATE TABLE IF NOT EXISTS station_jobs(
 # Columns added after the first release; the migration assigns existing rows to the key's account.
 COLUMNS = (('pods', 'account', "TEXT NOT NULL DEFAULT 'shared'"),
            ('runs', 'account', "TEXT NOT NULL DEFAULT 'shared'"),
-           ('runs', 'phase', 'TEXT'))
+           ('runs', 'phase', 'TEXT'),
+           ('station_settings', 'max_song_seconds', 'REAL NOT NULL DEFAULT 900'))
 
 
 def connect(path):
