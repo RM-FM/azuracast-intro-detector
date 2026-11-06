@@ -158,7 +158,7 @@ class Api:
             raise ValueError('include_set and dry_run must be true or false')
         count = backfill(service.con, station_id, None, options['include_set'], options['dry_run'],
                          now=service.clock())
-        return dict(songs=count, estimated_usd=_estimate(service, count),
+        return dict(songs=count, estimated_usd=status.estimate(service.con, count),
                     station=status.station(service, station_id))
 
     def retire_station_worker(self, service, data, station_id):
@@ -181,11 +181,6 @@ class Api:
         if delete:
             service.instance.set_marker(f'recovery:{account}', None)
         return dict(worker=pod['id'], action='deleted' if delete else 'stopped')
-
-
-def _estimate(service, songs):
-    per_thousand = status.cost_per_thousand(service.con)
-    return None if per_thousand is None else round(songs * per_thousand / 1000, 2)
 
 
 class _Handler(BaseHTTPRequestHandler):

@@ -30,6 +30,12 @@ def cost_per_thousand(con):
     return round(total_spend(con) / songs * 1000, 2) if songs else None
 
 
+def estimate(con, songs):
+    """Estimated GPU cost of analyzing songs, or None before the first completed batch."""
+    per_thousand = cost_per_thousand(con)
+    return None if per_thousand is None else round(songs * per_thousand / 1000, 2)
+
+
 def worker(con, account):
     if account is None:
         return None
@@ -61,6 +67,8 @@ def station(service, station_id):
     con, now = service.con, service.clock()
     settings = service.settings.get(station_id)
     account = service.gpus.account(station_id)
+    library = con.execute("SELECT COUNT(*) FROM media WHERE station_id=? AND status='known' AND intro_end IS NULL",
+                          (station_id,)).fetchone()[0]
     runs = [dict(r) for r in con.execute(
         'SELECT r.id, r.status, s.songs, r.started_at, r.finished_at, r.phase, SUBSTR(r.error, 1, 300) AS error '
         'FROM runs r JOIN run_stations s ON s.run_id = r.id WHERE s.station_id=? '
@@ -73,8 +81,8 @@ def station(service, station_id):
         queue=_counts(con, 'SELECT status, COUNT(*) FROM media WHERE station_id=? GROUP BY status', (station_id,)),
         publications=_counts(con, 'SELECT state, COUNT(*) FROM publications WHERE station_id=? GROUP BY state',
                              (station_id,)),
-        library_without_intro=con.execute("SELECT COUNT(*) FROM media WHERE station_id=? AND status='known' "
-                                          'AND intro_end IS NULL', (station_id,)).fetchone()[0],
+        library_without_intro=library,
+        library_estimate_usd=estimate(con, library),
         process_requested=station_id in service.requests(),
         jobs=[kind for sid, kind in service.jobs() if sid == station_id],
         blocked=service.blocked(settings) if settings.enabled else None,

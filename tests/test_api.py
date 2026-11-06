@@ -78,6 +78,7 @@ class ApiTests(unittest.TestCase):
         con.close()
         body = self.call('GET', '/api/v1/stations/4')[1]
         self.assertEqual((body['spend_month_usd'], body['key']['spend_month_usd']), (.5, 2.))
+        self.assertEqual(body['library_estimate_usd'], 0., 'Estimates use the cost per song so far')
         self.assertIsNone(self.call('GET', '/api/v1/stations/5')[1]['key'])
 
     def test_keys_are_validated_write_only_and_kept_while_a_worker_runs(self):
@@ -112,6 +113,7 @@ class ApiTests(unittest.TestCase):
         con.close()
         code, body = self.call('POST', '/api/v1/stations/1/backfill', {'dry_run': True})
         self.assertEqual((code, body['songs'], body['station']['queue']), (200, 2, {'known': 2}))
+        self.assertEqual((body['station']['library_without_intro'], body['station']['library_estimate_usd']), (2, None))
         self.assertEqual(self.call('POST', '/api/v1/stations/1/backfill')[1]['station']['queue'], {'pending': 2})
 
     def test_retiring_unconfirmed_workers_needs_force(self):
