@@ -66,8 +66,8 @@ For installation without the plugin's setup, see [manual installation](docs/ADVA
   publish the intros found so far.
 6. Validate station playback with sweepers before leaving publishing enabled.
 
-System administrators can instead offer the server's own Runpod account to stations,
-each with a monthly limit, in the page's server-wide settings.
+System administrators can instead offer a shared Runpod account to stations,
+each with a monthly limit, in the page's Shared Account section; stations see it as provided by the server administrator.
 
 ## Everyday use
 
