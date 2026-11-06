@@ -10,13 +10,15 @@ import uuid
 from . import evidence, publisher
 from .azuracast import AzuraCastError
 from .db import pack, unpack
-from .gpu import BudgetExceeded, GpuError, KeepPodRunning, MissingKey, NoCapacity, PodBusy, station_spend
+from .gpu import (BudgetExceeded, GpuError, KeepPodRunning, MissingKey, NoCapacity, PodBusy, WorkerNeedsRecovery,
+                  station_spend)
 from .library import sync_station
 from .stations import SHARED, Instance, Stations
 
 log = logging.getLogger(__name__)
-TRANSIENT = (NoCapacity, BudgetExceeded, PodBusy, KeepPodRunning, MissingKey, BlockingIOError)
+TRANSIENT = (NoCapacity, BudgetExceeded, PodBusy, KeepPodRunning, MissingKey, WorkerNeedsRecovery, BlockingIOError)
 RETRY_SECONDS = 900
+JOBS = ('sync', 'republish')
 
 
 class Service:
@@ -123,6 +125,47 @@ class Service:
 
     def requests(self):
         return {r['station_id']: bool(r['force']) for r in self.con.execute('SELECT * FROM process_requests')}
+
+    def queue_job(self, station_id, kind):
+        """Sync or republish a station from the service loop instead of the caller."""
+        if kind not in JOBS:
+            raise ValueError(f'Unknown job {kind!r}')
+        with self.con:
+            self.con.execute('INSERT OR REPLACE INTO station_jobs(station_id, kind, requested_at) VALUES(?,?,?)',
+                             (int(station_id), kind, self.clock()))
+
+    def jobs(self):
+        return [(r['station_id'], r['kind']) for r in
+                self.con.execute('SELECT * FROM station_jobs ORDER BY requested_at').fetchall()]
+
+    def run_jobs(self):
+        for station_id, kind in self.jobs():
+            with self.con:
+                self.con.execute('DELETE FROM station_jobs WHERE station_id=? AND kind=?', (station_id, kind))
+            if not self.settings.get(station_id).enabled:
+                continue
+            try:
+                if kind == 'sync':
+                    self.sync({station_id})
+                else:
+                    log.info('Station %s: re-published %d media', station_id, self.republish(station_id))
+            except Exception:
+                log.exception('Station %s: %s failed', station_id, kind)
+
+    def retry(self, station_id, media_id=None):
+        """Requeue failed songs, or one song in any state, with fresh attempts."""
+        query, params = "UPDATE media SET status='pending', attempts=0, error=NULL WHERE station_id=?", [station_id]
+        if media_id is not None:
+            query += ' AND media_id=?'
+            params.append(media_id)
+        else:
+            query += " AND status='failed'"
+        with self.con:
+            return self.con.execute(query, params).rowcount
+
+    def recovery(self, account):
+        """Message of a stopped worker that waits for an operator decision, or None."""
+        return self.instance.marker(f'recovery:{account}')
 
     def reusable(self, sha256, account):
         if not self.con.execute('SELECT 1 FROM analyses WHERE sha256=?', (sha256,)).fetchone():
@@ -255,6 +298,8 @@ class Service:
                                   getattr(worker, 'last_pod_id', None), run_id))
             log.error('GPU batch %s (%s) failed: %s', run_id, account, error)
             self.retry_at[account] = self.clock() + RETRY_SECONDS
+            if isinstance(error, WorkerNeedsRecovery):
+                self.instance.set_marker(f'recovery:{account}', str(error))
             # Capacity, budget, a busy worker or a failed copy are not the songs' fault.
             if isinstance(error, TRANSIENT):
                 return
@@ -263,6 +308,7 @@ class Service:
                     self._failed(media, f'GPU batch: {error}')
             return
         complete, failed = evidence.split(report, music, set(waiting))
+        self.instance.set_marker(f'recovery:{account}', None)
         with self.con:
             for sha256, (row, tune) in complete.items():
                 self.con.execute('INSERT OR REPLACE INTO analyses(sha256, source, run_id, report, music, created_at) '
@@ -299,6 +345,7 @@ class Service:
                 self.sync()
                 last_sync = self.clock()
             try:
+                self.run_jobs()
                 self.tick()
             except Exception:
                 log.exception('Processing failed')

@@ -120,6 +120,11 @@ CREATE TABLE IF NOT EXISTS process_requests(
   station_id INTEGER PRIMARY KEY,
   force INTEGER NOT NULL DEFAULT 0,
   requested_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS station_jobs(
+  station_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  requested_at REAL NOT NULL,
+  PRIMARY KEY(station_id, kind));
 '''
 # Columns added after the first release; existing rows belong to the shared account.
 COLUMNS = (('pods', 'account', "TEXT NOT NULL DEFAULT 'shared'"),

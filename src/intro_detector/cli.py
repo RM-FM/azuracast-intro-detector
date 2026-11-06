@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import time
 
-from . import config as config_module
+from . import api, config as config_module
 from .azuracast import AzuraCastError, Client
 from .db import audit, connect
 from .gpu import GpuError, Workers, account_spend
@@ -65,10 +65,16 @@ def _redecide(service, sha256):
 
 
 def cmd_run(args):
-    service = _service(args)
+    cfg = config_module.load(args.config)
+    service = build(cfg)
     # PID 1 in the container ignores SIGTERM by default; exit at once so "docker stop" is clean.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     with _owner(service.cfg):
+        token = os.environ.get(api.TOKEN_ENV)
+        if token:
+            api.serve(api.Api(token, lambda: build(cfg)), port=int(os.environ.get('INTRO_DETECTOR_API_PORT', 8080)))
+        else:
+            log.info('No %s set; the management API is off', api.TOKEN_ENV)
         service.run_forever()
 
 
@@ -211,15 +217,7 @@ def cmd_backfill(args):
 
 
 def cmd_retry(args):
-    con = _service(args).con
-    query, params = "UPDATE media SET status='pending', attempts=0, error=NULL WHERE station_id=?", [args.station]
-    if args.media:
-        query += ' AND media_id=?'
-        params.append(args.media)
-    else:
-        query += " AND status='failed'"
-    with con:
-        print(f'Requeued {con.execute(query, params).rowcount} songs')
+    print(f'Requeued {_service(args).retry(args.station, args.media)} songs')
 
 
 def cmd_decisions(args):

@@ -59,6 +59,10 @@ class MissingKey(GpuError):
     """The paying account has no Runpod API key."""
 
 
+class WorkerNeedsRecovery(GpuError):
+    """A stopped worker may hold reports that were never copied; an operator must decide."""
+
+
 def run_command(command, check=True, env=None):
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=env)
     if check and result.returncode:
@@ -240,8 +244,8 @@ class Runpod:
             if pod.get('desiredStatus') == 'EXITED' and row is not None and row['copied']:
                 self.retire(pod['id'], delete=True)
             else:
-                raise GpuError(f'Worker {pod["id"]} is stopped with unconfirmed evidence. Inspect it, then '
-                               f'run "intro-detector pod delete --force" before retrying.')
+                raise WorkerNeedsRecovery(f'Worker {pod["id"]} is stopped with unconfirmed evidence. Recover or '
+                                          f'delete it in Sweepers > Intro Detector before retrying.')
         budget = self.cfg.monthly_budget_usd
         if budget and self.spend() >= budget:
             raise BudgetExceeded(f'Estimated GPU spend this month reached {budget:.2f} USD; no Pod created')

@@ -4,7 +4,7 @@ import unittest
 from helpers import (Clock, FakeClient, FakeWorkers, database, enable, make_config, media, music_row, report_row,
                      tempdir, write_reports)
 from intro_detector.config import Station
-from intro_detector.gpu import GpuError, NoCapacity
+from intro_detector.gpu import GpuError, NoCapacity, WorkerNeedsRecovery
 from intro_detector.library import sync_station
 from intro_detector.service import Service
 from intro_detector.stations import SHARED, station_account
@@ -204,6 +204,28 @@ class Processing(QueueCase):
         service.request(1)
         service.tick()
         self.assertEqual(len(gpu.batches), 1)
+
+    def test_worker_needing_recovery_pauses_without_attempts(self):
+        service = self.service(FakeGpu(error=WorkerNeedsRecovery('stopped with unconfirmed evidence')), {})
+        self.upload(2)
+        self.clock.now += 61
+        service.process()
+        self.assertEqual(self.status(1, 2)[:2], ('pending', 0))
+        self.assertEqual(service.recovery(station_account(1)), 'stopped with unconfirmed evidence')
+
+    def test_jobs_run_once_for_enabled_stations(self):
+        service = self.service(FakeGpu(), {})
+        calls = []
+        service.republish = lambda station_id: calls.append(('republish', station_id)) or 0
+        service.sync = lambda station_ids: calls.append(('sync', station_ids))
+        service.queue_job(1, 'republish')
+        service.queue_job(1, 'sync')
+        service.queue_job(9, 'sync')
+        with self.assertRaises(ValueError):
+            service.queue_job(1, 'delete')
+        service.run_jobs()
+        self.assertEqual(calls, [('republish', 1), ('sync', {1})])
+        self.assertEqual(service.jobs(), [])
 
 
 class Accounts(QueueCase):
