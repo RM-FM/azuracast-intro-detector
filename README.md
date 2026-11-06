@@ -1,26 +1,46 @@
 # AzuraCast Intro Detector
 
 Detects song intros for the [AzuraCast Sweepers](https://github.com/RM-FM/azuracast-sweepers)
-plugin. It runs on the same server or a separate Linux server and uses Runpod GPU
-workers when a song needs analysis. No local GPU is required.
+plugin. It runs next to AzuraCast and rents Runpod GPU workers when a song needs
+analysis. No local GPU is required.
 
-Starts in **shadow mode**: proposed intro values are recorded, not written to AzuraCast.
-Existing manually edited intro values are protected.
+Each station switches it on in **Sweepers → Intro Detector** and pays with its own
+Runpod account and monthly budget. Stations start in **shadow mode**: proposed intro
+values are recorded, not written to AzuraCast. Intro values entered by hand are
+never overwritten.
 
-Version `0.1.1` is an experimental pre-release. Review proposed cues before enabling
-publishing; installation does not validate detection accuracy for your library.
+Review proposed cues before enabling publishing; installation does not validate
+detection accuracy for your library.
 
 ## Quick Start
 
-You need a Linux x86_64 server, Docker Engine, Docker Compose v2.20 or newer, Git
-and a Runpod account.
-Run the commands on the detector server, not on a GPU worker.
+You need AzuraCast with the Sweepers plugin on a Linux x86_64 server with Docker
+Compose v2.20 or newer, Git and root access. The AzuraCast **Site Base URL**
+(Administration → System Settings) must be set.
 
-### Before installing
+### Install
 
-Install the Sweepers plugin on AzuraCast. Create an AzuraCast API key for a dedicated
-user with **View** and **Media** permission on the stations to scan. Keep other
-administrative permissions disabled.
+The Sweepers plugin's setup offers the detector when the plugin is installed. To add
+it later, run in the plugin directory:
+
+```bash
+cd /var/azuracast/plugins/azuracast-sweepers
+sudo bash bin/setup.sh --detector
+```
+
+The detector is installed to `/opt/azuracast-intro-detector`, gets its own AzuraCast
+account and joins AzuraCast's Docker network. It opens no port and does not restart
+AzuraCast or interrupt broadcasting. No API key is entered on the command line.
+
+### Update
+
+The detector is updated with the plugin: `sudo bash bin/setup.sh` in the plugin
+directory moves it to the release that plugin version expects. Stored analyses,
+station settings and intro values are kept.
+
+For installation without the plugin's setup, see [manual installation](docs/ADVANCED.md#manual-installation).
+
+## First station setup
 
 #### Get a Runpod API key
 
@@ -28,95 +48,40 @@ administrative permissions disabled.
 2. Open [Credentials](https://console.runpod.io/user/credentials), select **API Keys**
   and click **Create API Key**.
 3. Name it for the detector. Give it read/write access for Pod and GPU management;
-  a **Read Only** key cannot create or stop workers. Use restricted permissions
-  where available. You do not need an S3 key.
-4. Copy the key into a password manager. Enter it only at the setup script's hidden
-  prompt; never commit it or paste it into an issue.
+  a **Read Only** key cannot create or stop workers. You do not need an S3 key.
+4. Keep the key in a password manager; it is entered only on the detector page.
 
-Worker images are prepared and maintained by this repository. Setup checks the
-default image automatically; you do not need to build images or configure a registry.
-If the check fails, verify network access to GHCR and retry. A missing or private
-bundled image must be corrected by the maintainers, not by adding a registry login.
+#### Enable the station
 
-### Install
-
-```bash
-sudo git clone --branch main https://github.com/RM-FM/azuracast-intro-detector.git /opt/azuracast-intro-detector
-cd /opt/azuracast-intro-detector
-sudo bash bin/setup.sh
-```
-
-The script asks for the AzuraCast address and both API keys. Enter a hostname with or
-without `https://`; a hostname without a scheme defaults to HTTPS. Plain HTTP is rejected
-unless `allow_http = true` is explicitly configured for a private Docker network. The
-script builds the service, verifies the worker image, prepares configuration, generates
-the worker SSH key, checks API access and waits for a healthy detector. API key prompts
-do not display the keys.
-
-Initial setup selects all stations visible to the API user, shadow mode and automatic
-processing. Its first sync inventories the existing library without queuing it for
-analysis; only later eligible new tracks with a blank `intro_end` are processed
-automatically. This may incur GPU charges. Setup does not start a GPU worker unless
-there is queued work.
-
-Continue with [First station setup](#first-station-setup).
-Other options are in [manual installation](docs/ADVANCED.md#manual-installation).
-
-### Update
-
-Allow any active scan to finish before updating.
-
-```bash
-cd /opt/azuracast-intro-detector
-sudo git pull --ff-only origin main
-sudo bash bin/setup.sh
-```
-
-Accept **Keep existing configuration** to preserve the host, keys and all settings.
-Stored analyses and intro values are kept. The script rebuilds and restarts only
-the detector; it does not restart AzuraCast or interrupt broadcasting.
-
-AzuraCast's own updater does not update the detector.
-For an alternative, see [manual update](docs/ADVANCED.md#manual-update).
-
-## First station setup
-
-1. Keep publishing disabled while preparing the station. Confirm that the desired
-  stations and library filters are selected in the configuration.
-2. Check the service and allow its first library sync to finish:
-
-  ```bash
-  sudo docker compose exec detector intro-detector status
-  ```
-
-3. Start with a small sample of existing songs. Replace `1` with your station ID:
-
-  ```bash
-  sudo docker compose exec detector intro-detector backfill --station 1 --limit 10
-  sudo docker compose exec detector intro-detector process
-  sudo docker compose exec detector intro-detector decisions --station 1
-  ```
-
-  **Processing uses paid GPU time** unless the song already has a stored analysis.
-  `process` works through the whole pending queue, not only the last backfill request.
-
-4. Listen to the sample in Sweepers' Intro Manager and compare the proposed cues
-  with the songs. Shadow mode has not changed their saved intro values.
-5. When satisfied, enable publishing for the intended station, restart the detector
-  and republish its checked results. Enable automatic processing only when ready.
-  See [publishing and automatic processing](docs/ADVANCED.md#publishing-and-automatic-processing).
+1. Open **Sweepers → Intro Detector** for the station. Changing it needs the station's
+  broadcasting permission.
+2. Switch the detector on, keep **Shadow** mode, enter the Runpod key and a monthly
+  budget, and save. New uploads are analyzed automatically from now on.
+3. To analyze songs already in the library, use **Analyze existing library**. It shows
+  the number of songs and an estimated cost before anything is queued.
+  **Processing uses paid GPU time** unless an identical file was analyzed before.
+4. Listen to results in Sweepers' Intro Manager. Shadow mode has not changed the
+  saved intro values.
+5. When satisfied, switch to **Publish** mode and choose **Write them to AzuraCast** to
+  publish the intros found so far.
 6. Validate station playback with sweepers before leaving publishing enabled.
+
+System administrators can instead offer the server's own Runpod account to stations,
+each with a monthly limit, in the page's server-wide settings.
 
 ## Everyday use
 
-New or replaced files are discovered automatically. Initial library discovery does
-not queue a complete backfill. Previously analyzed audio is reused across stations.
+New or replaced files are discovered automatically. The detector page shows the queue,
+failed songs, recent batches, this month's GPU cost and the running worker.
+Previously analyzed audio is reused across stations unless the administrator turns
+sharing off.
+
+For logs on the server:
 
 ```bash
-sudo docker compose exec detector intro-detector status
+cd /opt/azuracast-intro-detector
 sudo docker compose logs --tail 50 detector
 ```
-
 ### Intro end
 
 Values are seconds from the **original file start**, not from an AutoCue cue-in:

@@ -6,8 +6,9 @@ and file-administration commands with `sudo`.
 
 ## Installation and Compose
 
-The detector is independent of AzuraCast. It needs outbound HTTPS to AzuraCast and
-Runpod and SSH/rsync access to its Runpod worker. It exposes no inbound web port.
+The detector is independent of AzuraCast's containers. It needs outbound HTTPS to
+AzuraCast and Runpod and SSH/rsync access to its Runpod workers. Its management API
+listens only on AzuraCast's Docker network; no port is published on the host.
 Install Docker Engine, the Compose plugin and Git before running [setup](../bin/setup.sh).
 Compose v2.20+ is needed for the setup script's readiness wait.
 
@@ -15,32 +16,36 @@ The checkout contains:
 
 | Path | Purpose |
 | --- | --- |
-| `config.toml` | Operator settings; no API keys |
-| `.env` | AzuraCast and Runpod API keys; private, never committed |
+| `config.toml` | Operator settings and defaults; no API keys |
+| `.env` | AzuraCast API key and management API token; private, never committed |
+| `compose.override.yaml` | Joins AzuraCast's Docker network; written by setup |
 | `secrets/runpod-ssh-key` | Worker SSH private key; owned by UID 10001, mode 600 |
 | `.setup-backups/` | Private copies of settings before reconfiguration |
-| `detector-data` Compose volume | Database, analyses, queue, decisions and reports |
+| `detector-data` Compose volume | Database, analyses, queue, decisions, reports and Runpod keys |
 
-Standard installation and updates use the setup script; the manual procedures below
-are alternatives for custom deployments, not tasks every operator must perform.
+The Sweepers plugin's setup runs `bin/setup.sh --azuracast-dir DIR --unattended` and
+passes the AzuraCast site address and a new key of its detector account on standard
+input. Setup then:
 
-Setup builds the service image locally and checks the repository-provided public
-worker image using registry metadata, without downloading the full image or starting
-a Pod. It does not run a backfill or change AzuraCast broadcasting. First installation
-uses all visible stations, shadow mode and `auto_process = true`. The initial sync only
-records existing media; automatic processing applies to later eligible new media with a
-blank `intro_end` and may incur GPU charges.
+- builds the service image and checks the repository-provided public worker image
+  using registry metadata, without downloading it or starting a Pod;
+- writes `config.toml` and `.env`, creating the management API token once;
+- joins the network of AzuraCast's `web` container under the alias `intro-detector`;
+- runs `check`, starts the service and writes `.detector.json` into the plugin
+  directory, readable by AzuraCast's web user only.
 
-On updates, the default answer keeps all existing configuration bytes and keys.
-Choosing to reconfigure changes only the host and entered keys; blank key answers
-keep existing keys. Advanced settings, including the monthly budget, remain intact.
-Credential checks must succeed before the detector is restarted. If setup fails,
-its message gives the private technical log and settings-backup location.
+It does not run a backfill, enable a station or change AzuraCast broadcasting. Empty
+input lines keep the existing address and key. Without `--unattended` setup asks for
+them interactively. Credential checks must succeed before the detector is restarted.
+If setup fails, its message gives the private technical log and settings-backup location.
 
-For AzuraCast on the same machine, the public HTTPS URL is simplest. Private-network
-HTTP is supported only when the detector joins AzuraCast's Docker network and
-`[azuracast] allow_http = true` is explicitly configured. Do not enable this for
-a public HTTP endpoint. Custom `COMPOSE_FILE` setups require manual installation.
+`bin/update.sh --version vX.Y.Z --azuracast-dir DIR` moves the checkout to a release
+tag and reruns setup unattended. If setup fails, the previous release and image run
+again. The plugin's setup calls it with the release in its `detector.version`.
+
+The detector reaches AzuraCast through the public site address. Private-network
+HTTP is supported only with `[azuracast] allow_http = true`; AzuraCast redirects plain
+HTTP when "Always Use HTTPS" is on. Custom `COMPOSE_FILE` setups require manual installation.
 
 ## Manual installation
 
@@ -64,14 +69,24 @@ docker compose run --rm --no-deps detector check
 docker compose up -d --no-deps --wait detector
 ```
 
-Set the HTTPS address and station selection in `config.toml`; set only the two API
-keys in `.env`. Standard deployments use the repository's default worker image. For a
-controlled first test, set `[scan] auto_process = false` and keep station mode `shadow`.
+Set the HTTPS address in `config.toml` and the AzuraCast API key and a random
+`INTRO_DETECTOR_API_TOKEN` of at least 32 characters in `.env`. The API key's user needs
+station **View** and **Media** on each station the detector should process. Add a
+`compose.override.yaml` that joins AzuraCast's network with the alias `intro-detector`
+(see setup) and write the plugin's `.detector.json` with `{"url": "http://intro-detector:8080",
+"token": "…"}`. Standard deployments use the repository's default worker image.
 Do not regenerate an existing worker key without accounting for any active worker.
 
 ## Manual update
 
-Allow active scans to finish, read the changes and back up configuration and data, then:
+Plugin-managed installations are updated by the plugin's setup. Otherwise allow active
+scans to finish, read the changes and back up configuration and data, then:
+
+```bash
+sudo bash bin/update.sh --version vX.Y.Z --azuracast-dir /var/azuracast < /dev/null
+```
+
+or, for a checkout without the plugin:
 
 ```bash
 git pull --ff-only origin main
@@ -82,9 +97,14 @@ docker compose exec -T detector intro-detector status
 ```
 
 The Compose volume is retained. Do not use `down --volumes` for an update.
-Automatic processing resumes according to the existing configuration after restart;
-pause it beforehand if pending work should not start. Worker-image changes are
-separate from service updates and do not require reanalyzing unchanged audio automatically.
+Automatic processing resumes according to the station settings after restart.
+Worker-image changes are separate from service updates and do not require
+reanalyzing unchanged audio automatically.
+
+The first start of 1.0 moves an existing configuration into the station settings:
+stations selected in `config.toml` stay enabled with their mode and filters, the Runpod
+key from `.env` becomes the server's shared key and those stations pay with it. Later
+changes to station sections in `config.toml` have no effect.
 
 ## Configuration reference
 
@@ -98,30 +118,32 @@ docker compose up -d --no-deps --force-recreate --wait detector
 
 ### Stations and filters
 
-`[azuracast] stations = "all"` follows the enabled stations visible to the API user,
-including newly added stations. Discovery uses the authenticated dashboard endpoint,
-not the public station list. A list such as `stations = [1, 2, 7]` restricts scanning.
+Stations are enabled and configured on the Sweepers plugin's **Intro Detector** page,
+or with `intro-detector station set`. Settings per station:
 
-`[station_defaults]` applies to every selected station. A `[[stations]]` block overrides
-the settings for one station and always includes that station. Configurations with
-only station blocks and no `stations` selection remain explicit station lists.
-
-| Setting | Default | Meaning |
+| Setting | Default for a new station | Meaning |
 | --- | --- | --- |
-| `mode` | `shadow` | `off`, propose only, or `publish` |
-| `min_song_seconds` | `60` | Skip shorter files and files of unknown length |
-| `exclude_playlists` | `[]` | Additional playlist IDs excluded from analysis |
-| `timeout_seconds` | `60` | AzuraCast request timeout, under `[azuracast]` |
+| `enabled` | `false` | Sync, analyze and decide for this station |
+| `mode` | `[station_defaults] mode` | `shadow` (propose only) or `publish` |
+| `auto_process` | `[scan] auto_process` | Analyze new uploads without "Process now" |
+| `min_song_seconds` | `[station_defaults]`, `60` | Skip shorter files and files of unknown length |
+| `exclude_playlists` | `[station_defaults]`, `[]` | Additional playlist IDs excluded from analysis |
+| `billing` | `own` | `own` Runpod key or the server's `shared` key |
+| `budget_usd` | `10` | Monthly budget of the station's own key; `0` means none |
 
-Jingle Mode playlists are always excluded. The API user needs station **View** for
-discovery and **Media** for file access and intro writes. Never give the detector a
-global administrator key merely to resolve missing station permissions.
+Administrators set `shared_allowed` and `shared_cap_usd` (the station's monthly limit
+on the shared key; `0` leaves only the shared budget). `[azuracast] stations` and
+`[[stations]]` blocks are read only once, when an existing installation is migrated.
+
+Jingle Mode playlists are always excluded. The detector's AzuraCast account gets
+station **View** and **Media** from the plugin when a station is enabled. Never give the
+detector a global administrator key merely to resolve missing station permissions.
 
 ### Processing
 
 | `[scan]` setting | Service default | Meaning |
 | --- | --- | --- |
-| `auto_process` | `true` | Analyze newly queued files automatically; first setup enables it |
+| `auto_process` | `true` | Default of a newly enabled station |
 | `poll_seconds` | `300` | Library discovery interval |
 | `batch_quiet_seconds` | `120` | Wait after the last new upload before starting a batch |
 | `batch_max_songs` | `100` | Maximum originals per batch |
@@ -130,8 +152,12 @@ global administrator key merely to resolve missing station permissions.
 First discovery records the existing library without queuing it all. Later, only new
 media IDs with a blank `intro_end` are queued automatically; changes to existing media
 are recorded but not automatically reanalyzed. `backfill` queues existing blank intros
-at lower priority. `process` handles the entire pending blank-cue queue; it is not a
-per-station processing command.
+at lower priority. "Process now" (`process --station`) skips the quiet period for one
+station, also when automatic processing is off.
+
+A batch contains the songs of one paying account. Songs of an account without key,
+with an exhausted budget or after a failed batch wait; they are downloaded once to
+learn their audio hash, so an analysis stored for another station is still reused.
 
 ### Decision settings
 
@@ -151,35 +177,50 @@ not this configuration. Changing them can require fresh analyses.
 
 ## Publishing and automatic processing
 
-Start with one station. For example:
-
-```toml
-[[stations]]
-id = 1
-mode = "publish"
-```
-
-Keep other stations in shadow mode. Recreate and publish the checked stored decisions:
+Start with one station. Switch it to **Publish** on the Intro Detector page; intros found
+in shadow mode are written with **Write them to AzuraCast**. From the command line:
 
 ```bash
-docker compose up -d --no-deps --force-recreate --wait detector
+docker compose exec detector intro-detector station set 1 mode=publish
 docker compose exec detector intro-detector decision-diff --station 1
 docker compose exec detector intro-detector republish --station 1
 ```
 
-The dry-run report lists proposed changes. `republish` uses stored analyses and does
+The dry-run report lists proposed changes. Republishing uses stored analyses and does
 not create a GPU worker. Check results before applying them.
 
-Set `[scan] auto_process = false` when uploads should wait for a manual `process`
-request. This setting is independent of station publishing mode: shadow-mode analysis
-still costs money when it needs a GPU.
+Switch off **Analyze new uploads automatically** when uploads should wait for "Process
+now". This is independent of the publishing mode: shadow-mode analysis still costs
+money when it needs a GPU.
+
+## Paying accounts and the management API
+
+Each station pays with its own Runpod key and monthly budget. An administrator can
+also store a shared key with its own budget and allow single stations to use it, each
+with an optional monthly limit. Every paying account has its own worker
+(`azuracast-intro-detector` for the shared key, `azuracast-intro-detector-station-N`
+otherwise), lock, budget and spend estimate; a station's share of a shared worker is
+estimated from its analyzed songs. Keys are checked with Runpod before they are stored
+in `secrets.json` (mode 600) in the data volume and reach `runpodctl` only through its
+environment. A key cannot be removed while its account has an active worker.
+
+Stored analyses are reused for identical files across stations. With
+`share_analyses = false` a station's account pays for its own analysis of a file that
+another account analyzed.
+
+The service starts the management API on port 8080 when `INTRO_DETECTOR_API_TOKEN` is
+set. Every request needs `Authorization: Bearer <token>`; the API never returns keys.
+It serves `/api/v1/health`, `/api/v1/instance` (shared key, budget, price cap, sharing,
+station allowances) and `/api/v1/stations/{id}` (settings, key, status, process, retry,
+backfill, publish preview, publish and worker retirement). The Sweepers plugin enforces
+AzuraCast permissions before calling it; do not expose the port elsewhere.
 
 ## Automatic GPU workers
 
 The repository supplies the default worker-image reference and is responsible for
-preparing, testing and publishing it before an operator release. Operators provide
-their Runpod key; they do not build worker images, choose CUDA packages or configure
-registry credentials for the standard installation.
+preparing, testing and publishing it before an operator release. Stations and
+administrators provide Runpod keys on the Intro Detector page; they do not build worker
+images, choose CUDA packages or configure registry credentials for the standard installation.
 
 Setup verifies that the default public image is accessible anonymously before changing
 credentials or starting the service. If it is unavailable, setup stops with a
@@ -207,19 +248,20 @@ downloads, provider billing and changing rates can add cost.
 Previously analyzed audio is reused by SHA256 across stations without GPU inference.
 The detector host's own hosting and storage costs are separate.
 
-Configure cost controls in the existing `[runpod]` section:
+Budgets and the hourly price cap are set on the Intro Detector page. The values in
+`[runpod]` are the defaults for the shared key's budget and the price cap:
 
 ```toml
 monthly_budget_usd = 50.0
 max_price_per_hour = 0.90
 ```
 
-The monthly limit uses estimated spend recorded by this detector for a UTC calendar
+Each monthly limit uses estimated spend recorded by this detector for a UTC calendar
 month. `0` disables it. It blocks new worker creation once reached; it is not a
 provider-enforced spending cap and does not account for other Runpod workloads.
 Existing workers, billing delay and ancillary charges can exceed the estimate.
-Manage account funding and billing separately in the Runpod console. Setup never
-asks for, resets or changes the monthly budget. There is no daily-budget setting.
+Manage account funding and billing separately in the Runpod console. Deleting a
+stopped worker keeps its recorded end time. There is no daily-budget setting.
 
 Other `[runpod]` settings control allowed GPU types and relative speed, minimum
 speed, worker disk size, wait time, maximum batch runtime and parallel lanes.
@@ -264,14 +306,20 @@ detector should manage that value again.
 ```bash
 docker compose exec detector intro-detector check
 docker compose exec detector intro-detector status
+docker compose exec detector intro-detector station show
+docker compose exec detector intro-detector station set 1 enabled=true mode=shadow budget_usd=20
+docker compose exec detector intro-detector instance max_price_per_hour=0.9
+docker compose exec -T detector intro-detector key set station-1 < runpod-key.txt
 docker compose exec detector intro-detector backfill --station 1 --dry-run
 docker compose exec detector intro-detector backfill --station 1 --limit 100
-docker compose exec detector intro-detector process
+docker compose exec detector intro-detector process --station 1
 docker compose exec detector intro-detector decisions --station 1
 docker compose exec detector intro-detector retry --station 1
-docker compose exec detector intro-detector pod status
+docker compose exec detector intro-detector pod status --account station-1
 ```
 
+Stations enabled from the command line also need AzuraCast access: run
+`azuracast_cli sweepers:detector-account --sync` in AzuraCast's `web` container.
 `backfill --include-set` also considers already tagged files; use deliberately. Pair it
 with `process --force` only when intentionally replacing existing cues. For completed
 analyses, `republish --force` uses stored evidence and permits replacement only in
@@ -291,12 +339,13 @@ docker compose exec detector intro-detector review list
 
 ## Backups
 
-Keep configuration, `.env`, worker keys and the data volume backed up securely.
-Settings backups contain secrets and must not be committed or shared publicly.
-For a consistent data backup, first stop any worker and then the service:
+Keep configuration, `.env`, worker keys and the data volume backed up securely; the
+volume also holds the Runpod keys. Settings backups contain secrets and must not be
+committed or shared publicly. For a consistent data backup, first stop any worker and
+then the service:
 
 ```bash
-docker compose exec detector intro-detector pod stop
+docker compose exec detector intro-detector pod stop --account shared
 docker compose stop detector
 docker compose run -T --rm --no-deps --entrypoint tar detector -czf - -C /data . > detector-data.tar.gz
 docker compose up -d detector
@@ -308,12 +357,14 @@ Do not delete a worker containing reports that have not been recovered.
 
 ## Troubleshooting
 
-- **API check fails:** verify HTTPS, the keys and station View/Media permissions.
-  The Runpod key must manage Pods; a read-only key is insufficient.
-- **No stations:** confirm the API user's permissions and station selection. Public
-  station-list visibility is not used for authenticated discovery.
+- **API check fails:** verify HTTPS and the AzuraCast key. Missing station permissions
+  are only warnings in `check`; the plugin grants them for enabled stations.
+- **Runpod key rejected:** the key must manage Pods; a read-only key is insufficient.
+- **Station blocked:** the Intro Detector page names the reason: no key, budget or
+  station limit reached, a failed batch waiting for its retry, or a stopped worker
+  that needs a decision.
 - **No scans:** initial sync does not backfill. Check the pending queue, filters and
-  `auto_process`; manual mode requires `process`.
+  the station's automatic processing; manual stations need "Process now".
 - **No GPU capacity:** check allowed GPU types, speed and hourly price cap. Do not
   remove cost limits just to silence the error.
 - **Bundled worker unavailable:** report the setup failure to the repository
@@ -322,7 +373,8 @@ Do not delete a worker containing reports that have not been recovered.
 - **Worker SSH failure:** confirm UID 10001 can read the mounted private key. Preserve
   the existing key while its worker is active.
 - **Stopped worker with uncopied reports:** recover the reports before deleting it.
-  A forced deletion deliberately discards that protection.
+  Analysis on that account pauses without using up song attempts. Deleting the worker
+  on the Intro Detector page (or `pod delete --force --account …`) discards that protection.
 - **Disk full or SQLite error:** stop new processing, free disposable build/test
   artifacts and retain the data volume. Do not delete the database, WAL or analyses
   to make an error disappear. Restore from a consistent backup only after diagnosis.

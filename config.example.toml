@@ -1,4 +1,5 @@
-# Copy to config.toml. Secrets (AzuraCast and Runpod API keys) come from .env, never from this file.
+# Copy to config.toml. The AzuraCast API key comes from .env; Runpod keys, stations and budgets are
+# managed on the Sweepers plugin's Intro Detector page.
 # Simple settings first; the further down, the more specialised. Omitted settings use the defaults shown.
 # data_dir = "/data"
 
@@ -6,17 +7,16 @@
 
 [azuracast]
 base_url = "https://radio.example.com"
-# "all": every enabled station the API key's user may view, new ones included; or a list of IDs,
-# e.g. [1, 2, 7]. Stations with their own [[stations]] block below are always included.
-# Default: "all", or only the [[stations]] blocks when there are any.
+# Read only once, when an installation from before 1.0 moves its stations to the Intro Detector page:
+# "all" or a list of station IDs such as [1, 2, 7].
 stations = "all"
 timeout_seconds = 60
 # Only for a private Docker network to AzuraCast's web container (e.g. http://web):
 # allow_http = true
 
-# Applies to every station without its own [[stations]] block.
+# Defaults for a station when it is first enabled on the Intro Detector page.
 [station_defaults]
-# off | shadow (decide and record, never write) | publish
+# shadow (decide and record, never write) | publish
 mode = "shadow"
 # Shorter files (station IDs, sweepers, unknown length) are not analyzed.
 min_song_seconds = 60
@@ -26,7 +26,8 @@ exclude_playlists = []
 # --- Processing ----------------------------------------------------------------------------
 
 [scan]
-# true: analyze new uploads automatically; false: only queue them until `intro-detector process`.
+# Default for a newly enabled station: true analyzes new uploads automatically; false queues them until
+# "Process now".
 auto_process = true
 poll_seconds = 300
 # Wait this long after the last new upload before starting a GPU batch.
@@ -45,8 +46,8 @@ no_intro_below_seconds = 2.0
 music_min_seconds = 3.0
 music_max_seconds = 27.0
 
-# --- Per-station overrides --------------------------------------------------------------------
-# Any setting from [station_defaults]; repeat the block per station.
+# --- Stations before 1.0 ----------------------------------------------------------------------
+# Read only once when an existing installation is migrated; afterwards use the Intro Detector page.
 
 # [[stations]]
 # id = 1
@@ -59,7 +60,8 @@ music_max_seconds = 27.0
 [runpod]
 # Runpod registry entry for a private GPU image (`runpodctl registry list`); empty for a public image.
 registry_auth_id = ""
-# Estimated GPU spend per UTC month; 0 disables the limit.
+# Defaults for the server's shared Runpod key: estimated GPU spend per UTC month (0 disables the limit)
+# and the highest hourly GPU price. Both can be changed on the Intro Detector page.
 monthly_budget_usd = 50.0
 max_price_per_hour = 0.90
 # Prepared image (gpu/Dockerfile): environments and all pinned models baked in.
