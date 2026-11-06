@@ -14,7 +14,7 @@ import threading
 from . import status
 from .gpu import GpuError, run_command
 from .library import backfill
-from .stations import SHARED, station_account, valid_key
+from .stations import key_account, key_slot, valid_key
 
 log = logging.getLogger(__name__)
 API_VERSION = 1
@@ -41,12 +41,7 @@ class Api:
         self.token, self.open_service, self.key_works = token, open_service, key_works
         self.routes = [
             ('GET', r'/api/v1/health', self.health),
-            ('GET', r'/api/v1/instance', self.get_instance),
-            ('PUT', r'/api/v1/instance', self.put_instance),
-            ('PUT', r'/api/v1/instance/key', self.put_shared_key),
-            ('DELETE', r'/api/v1/instance/key', self.delete_shared_key),
-            ('PUT', r'/api/v1/instance/stations/(\d+)', self.put_station_allowance),
-            ('POST', r'/api/v1/instance/worker/retire', self.retire_shared_worker),
+            ('GET', r'/api/v1/stations', self.list_stations),
             ('GET', r'/api/v1/stations/(\d+)', self.get_station),
             ('PUT', r'/api/v1/stations/(\d+)', self.put_station),
             ('PUT', r'/api/v1/stations/(\d+)/key', self.put_station_key),
@@ -94,33 +89,12 @@ class Api:
                 service.con.close()
         return (405, {'error': 'Method not allowed'}) if allowed else (404, {'error': 'Not found'})
 
-    # -- instance ----------------------------------------------------------
     def health(self, service, data):
         return dict(status='ok', version=status.version(), api=API_VERSION)
 
-    def get_instance(self, service, data):
-        return status.instance(service)
+    def list_stations(self, service, data):
+        return dict(stations=[dict(id=s.id, enabled=s.enabled) for s in service.settings.all()])
 
-    def put_instance(self, service, data):
-        service.instance.update(data)
-        return status.instance(service)
-
-    def put_shared_key(self, service, data):
-        self._store_key(service, SHARED, data)
-        return status.instance(service)
-
-    def delete_shared_key(self, service, data):
-        self._remove_key(service, SHARED)
-        return status.instance(service)
-
-    def put_station_allowance(self, service, data, station_id):
-        service.settings.update(station_id, data, admin=True)
-        return status.instance(service)
-
-    def retire_shared_worker(self, service, data):
-        return self._retire(service, SHARED, data)
-
-    # -- stations ----------------------------------------------------------
     def get_station(self, service, data, station_id):
         return status.station(service, station_id)
 
@@ -132,12 +106,31 @@ class Api:
         return status.station(service, station_id)
 
     def put_station_key(self, service, data, station_id):
-        self._store_key(service, station_account(station_id), data)
+        key = valid_key(data.get('key'))
+        if not self.key_works(key):
+            raise ApiError(422, 'Runpod rejected this API key; check that it may manage Pods')
+        self._release(service, station_id, key_account(key))
+        service.gpus.secrets.set(key_slot(station_id), key)
+        log.info('Runpod key stored for station %s', station_id)
+        service.gpus.balance(key_account(key), refresh=True)
+
         return status.station(service, station_id)
 
     def delete_station_key(self, service, data, station_id):
-        self._remove_key(service, station_account(station_id))
+        self._release(service, station_id)
+        service.gpus.secrets.set(key_slot(station_id), None)
+        log.info('Runpod key removed for station %s', station_id)
         return status.station(service, station_id)
+
+    @staticmethod
+    def _release(service, station_id, new_account=None):
+        """The station's current key may only go while no worker depends on it alone."""
+        account = service.gpus.account(station_id)
+        if account is None or account == new_account or not status.worker(service.con, account):
+            return
+        if service.gpus.key_stations(account) < 2:
+
+            raise ApiError(409, 'A GPU worker still runs on this Runpod key; change the key after it is retired')
 
     def _enabled(self, service, station_id):
         settings = service.settings.get(station_id)
@@ -188,27 +181,13 @@ class Api:
         return status.station(service, station_id)
 
     def retire_station_worker(self, service, data, station_id):
-        return self._retire(service, station_account(station_id), data)
-
-    # -- shared helpers ----------------------------------------------------
-    def _store_key(self, service, account, data):
-        key = valid_key(data.get('key'))
-        if not self.key_works(key):
-            raise ApiError(422, 'Runpod rejected this API key; check that it may manage Pods')
-        service.gpus.secrets.set(account, key)
-        log.info('Runpod key stored for %s', account)
-
-    def _remove_key(self, service, account):
-        if status.worker(service.con, account):
-            raise ApiError(409, 'A GPU worker of this account is still active; remove the key after it is retired')
-        service.gpus.secrets.set(account, None)
-        log.info('Runpod key removed for %s', account)
-
-    def _retire(self, service, account, data):
-        """Stop or delete the account's worker; deleting unconfirmed evidence needs force."""
+        """Stop or delete the worker of the station's Runpod key; deleting unconfirmed evidence needs force."""
         delete, force = data.get('delete', True), data.get('force', False)
         if not isinstance(delete, bool) or not isinstance(force, bool):
             raise ValueError('delete and force must be true or false')
+        account = service.gpus.account(station_id)
+        if account is None:
+            raise ApiError(409, 'This station has no Runpod key')
         gpu = service.gpus.get(account)
         pod = gpu.worker()
         if pod is None:

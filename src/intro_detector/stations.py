@@ -1,5 +1,6 @@
-"""Station and instance settings managed through the API, Runpod keys and the 0.x migration."""
+"""Station settings managed through the API, Runpod keys per station and settings migrations."""
 from dataclasses import asdict, dataclass, fields, replace
+import hashlib
 import json
 import math
 import os
@@ -8,20 +9,20 @@ import tempfile
 
 from .config import Station
 
-SHARED = 'shared'
 STATION_MODES = ('shadow', 'publish')
-BILLING = ('own', 'shared')
 MAX_USD = 100000.
+# Version of the stored settings model; version 1 had a server-wide shared Runpod key.
+SETTINGS_VERSION = 2
 
 
-def station_account(station_id):
+def key_slot(station_id):
+    """Name under which a station's Runpod key is stored."""
     return f'station-{int(station_id)}'
 
 
-def account_station(account):
-    """Station ID of a station account, or None for the shared account."""
-    prefix, _, number = account.partition('-')
-    return int(number) if prefix == 'station' and number.isdigit() else None
+def key_account(key):
+    """Stations with the same Runpod key share one GPU worker; the account is named after the key's hash."""
+    return 'runpod-' + hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
 def _bool(name, value):
@@ -52,7 +53,7 @@ def valid_key(key):
 
 
 class Secrets:
-    """Runpod API keys per account in a 0600 file of the data volume; never returned by the API."""
+    """Runpod API keys per station in a 0600 file of the data volume; never returned by the API."""
 
     def __init__(self, data_dir):
         self.path = Path(data_dir) / 'secrets.json'
@@ -64,21 +65,24 @@ class Secrets:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def get(self, account):
-        return self._read().get(account) or None
+    def get(self, slot):
+        return self._read().get(slot) or None
 
-    def has(self, account):
-        return self.get(account) is not None
+    def has(self, slot):
+        return self.get(slot) is not None
 
-    def accounts(self):
-        return sorted(account for account, key in self._read().items() if key)
+    def slots(self):
+        return sorted(slot for slot, key in self._read().items() if key)
 
-    def set(self, account, key):
+    def keys(self):
+        return sorted({key for key in self._read().values() if key})
+
+    def set(self, slot, key):
         data = self._read()
         if key is None:
-            data.pop(account, None)
+            data.pop(slot, None)
         else:
-            data[account] = valid_key(key)
+            data[slot] = valid_key(key)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix='.secrets-')
         try:
@@ -100,55 +104,37 @@ class StationSettings:
     auto_process: bool = True
     min_song_seconds: float = 60.0
     exclude_playlists: tuple = ()
-    # 'own': the station's Runpod key and budget_usd; 'shared': the instance key within shared_cap_usd.
-    billing: str = 'own'
+    # Estimated GPU spend of this station per UTC month; 0 disables the limit.
     budget_usd: float = 10.0
-    shared_allowed: bool = False
-    # Monthly limit of this station on the shared key; 0 means only the shared budget applies.
-    shared_cap_usd: float = 0.0
-
-    @property
-    def account(self):
-        return SHARED if self.billing == 'shared' else station_account(self.id)
 
     @property
     def station(self):
         return Station(self.id, self.mode if self.enabled else 'off', self.exclude_playlists, self.min_song_seconds)
 
     def public(self):
-        return {**asdict(self), 'exclude_playlists': list(self.exclude_playlists), 'account': self.account}
+        return {**asdict(self), 'exclude_playlists': list(self.exclude_playlists)}
 
 
-STATION_FIELDS = ('enabled', 'mode', 'auto_process', 'min_song_seconds', 'exclude_playlists', 'billing', 'budget_usd')
-ADMIN_FIELDS = ('shared_allowed', 'shared_cap_usd')
+STATION_FIELDS = tuple(f.name for f in fields(StationSettings) if f.name != 'id')
 
 
-def _validated(settings, changes, admin):
-    allowed = STATION_FIELDS + (ADMIN_FIELDS if admin else ())
-    unknown = set(changes) - set(allowed)
+def _validated(settings, changes):
+    unknown = set(changes) - set(STATION_FIELDS)
     if unknown:
-        raise ValueError(f'Settings not allowed here: {sorted(unknown)}')
+        raise ValueError(f'Unknown station settings: {sorted(unknown)}')
     values = dict(changes)
-    for name in ('enabled', 'auto_process', 'shared_allowed'):
+    for name in ('enabled', 'auto_process'):
         if name in values:
             _bool(name, values[name])
     if 'mode' in values and values['mode'] not in STATION_MODES:
         raise ValueError(f'mode must be one of {STATION_MODES}')
-    if 'billing' in values and values['billing'] not in BILLING:
-        raise ValueError(f'billing must be one of {BILLING}')
     if 'min_song_seconds' in values:
         values['min_song_seconds'] = _number('min_song_seconds', values['min_song_seconds'], 0, 3600)
     if 'exclude_playlists' in values:
         values['exclude_playlists'] = _playlists(values['exclude_playlists'])
-    for name in ('budget_usd', 'shared_cap_usd'):
-        if name in values:
-            values[name] = _number(name, values[name], 0, MAX_USD)
-    updated = replace(settings, **values)
-    if updated.billing == 'shared' and not updated.shared_allowed:
-        if 'billing' in values:
-            raise ValueError('The instance key is not available to this station')
-        updated = replace(updated, billing='own')
-    return updated
+    if 'budget_usd' in values:
+        values['budget_usd'] = _number('budget_usd', values['budget_usd'], 0, MAX_USD)
+    return replace(settings, **values)
 
 
 class Stations:
@@ -159,12 +145,13 @@ class Stations:
         base = self.cfg.station_defaults
         return StationSettings(int(station_id), mode=base.mode if base.mode in STATION_MODES else 'shadow',
                                auto_process=self.cfg.auto_process, min_song_seconds=float(base.min_song_seconds),
-                               exclude_playlists=tuple(base.exclude_playlists))
+                               exclude_playlists=tuple(base.exclude_playlists),
+                               budget_usd=float(self.cfg.runpod.monthly_budget_usd))
 
     @staticmethod
     def _from_row(row):
         values = {f.name: row['station_id' if f.name == 'id' else f.name] for f in fields(StationSettings)}
-        for name in ('enabled', 'auto_process', 'shared_allowed'):
+        for name in ('enabled', 'auto_process'):
             values[name] = bool(values[name])
         values['exclude_playlists'] = tuple(json.loads(values['exclude_playlists']))
         return StationSettings(**values)
@@ -192,76 +179,93 @@ class Stations:
                 (station_id, *values.values(), self.clock()))
         return settings
 
-    def update(self, station_id, changes, admin=False):
-        return self.save(_validated(self.get(station_id), changes, admin))
-
-
-@dataclass(frozen=True)
-class InstanceSettings:
-    max_price_per_hour: float
-    shared_budget_usd: float
-    share_analyses: bool = True
+    def update(self, station_id, changes):
+        return self.save(_validated(self.get(station_id), changes))
 
 
 class Instance:
-    def __init__(self, con, cfg):
-        self.con, self.cfg = con, cfg
+    """Internal markers of the service; all settings belong to stations."""
+
+    def __init__(self, con):
+        self.con = con
 
     def _stored(self):
         return {r['key']: json.loads(r['value']) for r in self.con.execute('SELECT * FROM instance_settings')}
-
-    def get(self):
-        stored = self._stored()
-        defaults = InstanceSettings(self.cfg.runpod.max_price_per_hour, self.cfg.runpod.monthly_budget_usd)
-        return replace(defaults, **{f.name: stored[f.name] for f in fields(InstanceSettings) if f.name in stored})
-
-    def update(self, changes):
-        unknown = set(changes) - {f.name for f in fields(InstanceSettings)}
-        if unknown:
-            raise ValueError(f'Unknown instance settings: {sorted(unknown)}')
-        values = dict(changes)
-        if 'share_analyses' in values:
-            _bool('share_analyses', values['share_analyses'])
-        if 'max_price_per_hour' in values:
-            values['max_price_per_hour'] = _number('max_price_per_hour', values['max_price_per_hour'], .05, 20)
-        if 'shared_budget_usd' in values:
-            values['shared_budget_usd'] = _number('shared_budget_usd', values['shared_budget_usd'], 0, MAX_USD)
-        self._put(values)
-        return self.get()
-
-    def _put(self, values):
-        with self.con:
-            self.con.executemany('INSERT OR REPLACE INTO instance_settings(key, value) VALUES(?,?)',
-                                 [(k, json.dumps(v)) for k, v in values.items()])
 
     def marker(self, name):
         return self._stored().get(f'_{name}')
 
     def set_marker(self, name, value):
-        self._put({f'_{name}': value})
+        with self.con:
+            self.con.execute('INSERT OR REPLACE INTO instance_settings(key, value) VALUES(?,?)',
+                             (f'_{name}', json.dumps(value)))
+
+
+def _keep_worker_name(con, instance, old_account, key, name):
+    """Records of an earlier account move to the key's account; its worker keeps its Runpod name."""
+    account = key_account(key)
+    names = instance.marker('worker_names') or {}
+    names.setdefault(account, name)
+    instance.set_marker('worker_names', names)
+    recovery = instance.marker(f'recovery:{old_account}')
+    if recovery:
+        instance.set_marker(f'recovery:{account}', recovery)
+    with con:
+        con.execute('DELETE FROM instance_settings WHERE key=?', (f'_recovery:{old_account}',))
+        for table in ('pods', 'runs'):
+            con.execute(f'UPDATE {table} SET account=? WHERE account=?', (account, old_account))
+
+
+def _from_legacy_install(con, cfg, stations, instance, secrets, environ):
+    """0.x: configured stations stay enabled and get the Runpod key from .env."""
+    existing = con.execute('SELECT EXISTS(SELECT 1 FROM stations) OR EXISTS(SELECT 1 FROM analyses)').fetchone()[0]
+    if not existing:
+        return False
+    key = environ.get('RUNPOD_API_KEY')
+    ids = {s.id for s in cfg.stations}
+    if cfg.all_stations:
+        ids |= {row[0] for row in con.execute('SELECT station_id FROM stations')}
+    for station_id in sorted(ids):
+        legacy = cfg.station(station_id)
+        stations.save(replace(stations.defaults(station_id), enabled=legacy.mode != 'off',
+                              mode=legacy.mode if legacy.mode in STATION_MODES else 'shadow',
+                              min_song_seconds=float(legacy.min_song_seconds),
+                              exclude_playlists=tuple(legacy.exclude_playlists)))
+        if key:
+            secrets.set(key_slot(station_id), key)
+    if key:
+        _keep_worker_name(con, instance, 'shared', key, cfg.runpod.worker_name)
+    return True
+
+
+def _from_shared_key(con, cfg, instance, secrets):
+    """Version 1: stations billed to the shared key now hold that key themselves."""
+    shared = secrets.get('shared')
+    columns = {row['name'] for row in con.execute('PRAGMA table_info(station_settings)')}
+    for row in con.execute('SELECT * FROM station_settings').fetchall():
+        slot = key_slot(row['station_id'])
+        if shared and 'billing' in columns and row['billing'] == 'shared':
+            secrets.set(slot, shared)
+        elif secrets.has(slot):
+            _keep_worker_name(con, instance, slot, secrets.get(slot), f'{cfg.runpod.worker_name}-{slot}')
+    if shared:
+        _keep_worker_name(con, instance, 'shared', shared, cfg.runpod.worker_name)
+        secrets.set('shared', None)
+    with con:
+        for key in [k for k in instance._stored() if not k.startswith('_')]:
+            con.execute('DELETE FROM instance_settings WHERE key=?', (key,))
+        con.execute('DROP TABLE IF EXISTS analysis_accounts')
 
 
 def migrate(con, cfg, stations, instance, secrets, environ):
-    """Once: a Runpod key from .env becomes the shared key; stations of a 0.x install stay enabled on it."""
-    if instance.marker('migrated'):
+    """Bring stored settings to the current model once; True when an existing installation was migrated."""
+    version = instance.marker('migrated') or 0
+    if version >= SETTINGS_VERSION:
         return False
-    key = environ.get('RUNPOD_API_KEY')
-    if key and not secrets.has(SHARED):
-        secrets.set(SHARED, key)
-    existing = con.execute('SELECT EXISTS(SELECT 1 FROM stations) OR EXISTS(SELECT 1 FROM analyses)').fetchone()[0]
-    if existing:
-        ids = {s.id for s in cfg.stations}
-        if cfg.all_stations:
-            ids |= {row[0] for row in con.execute('SELECT station_id FROM stations')}
-        for station_id in sorted(ids):
-            legacy = cfg.station(station_id)
-            stations.save(replace(stations.defaults(station_id), enabled=legacy.mode != 'off',
-                                  mode=legacy.mode if legacy.mode in STATION_MODES else 'shadow',
-                                  min_song_seconds=float(legacy.min_song_seconds),
-                                  exclude_playlists=tuple(legacy.exclude_playlists),
-                                  billing='shared', shared_allowed=True))
-        with con:
-            con.execute('INSERT OR IGNORE INTO analysis_accounts(sha256, account) SELECT sha256, ? FROM analyses',
-                        (SHARED,))
-    instance.set_marker('migrated', 1)
-    return bool(existing)
+    if version == 0:
+        migrated = _from_legacy_install(con, cfg, stations, instance, secrets, environ)
+    else:
+        _from_shared_key(con, cfg, instance, secrets)
+        migrated = True
+    instance.set_marker('migrated', SETTINGS_VERSION)
+    return migrated

@@ -18,7 +18,6 @@ import zlib
 
 from . import evidence
 from .db import pack, unpack
-from .stations import SHARED
 
 NAME = re.compile(r'[A-Za-z0-9_-]{1,64}')
 # Language that Whisper detected on the Mel-Band stem: the per-song ASR language of B.
@@ -137,7 +136,10 @@ def run(service, name, max_usd=None, log=print):
     result = dict(already=len(entries) - len(todo), stored=0, failed={}, changed_audio=[])
     if not todo:
         return result
-    gpu = service.gpus.get(SHARED)
+    account = next((a for a in map(service.gpus.account, sorted({e['station_id'] for e in todo})) if a), None)
+    if account is None:
+        raise ValueError('None of the set''s stations has a Runpod key')
+    gpu = service.gpus.get(account)
     if max_usd is not None:
         gpu.cfg = cost_limits(gpu.cfg, gpu.spend(), max_usd)
         log(f'Cost cap {max_usd:.2f} USD: batch stops after {gpu.cfg.max_run_minutes} minutes')

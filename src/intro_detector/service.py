@@ -1,4 +1,4 @@
-"""Queue processing: download, analyze on the paying account's GPU worker, decide and publish."""
+"""Queue processing: download, analyze on the GPU worker of the station's Runpod key, decide and publish."""
 from collections import Counter
 import json
 import logging
@@ -10,10 +10,9 @@ import uuid
 from . import evidence, publisher
 from .azuracast import AzuraCastError
 from .db import pack, unpack
-from .gpu import (BudgetExceeded, GpuError, KeepPodRunning, MissingKey, NoCapacity, PodBusy, WorkerNeedsRecovery,
-                  station_spend)
+from .gpu import BudgetExceeded, GpuError, KeepPodRunning, MissingKey, NoCapacity, PodBusy, WorkerNeedsRecovery
 from .library import sync_station
-from .stations import SHARED, Instance, Stations
+from .stations import Instance, Stations
 
 log = logging.getLogger(__name__)
 TRANSIENT = (NoCapacity, BudgetExceeded, PodBusy, KeepPodRunning, MissingKey, WorkerNeedsRecovery, BlockingIOError)
@@ -27,9 +26,9 @@ class Service:
         self.cfg, self.con, self.client, self.gpus = cfg, con, client, gpus
         self.clock, self.sleep = clock, sleep
         self.settings = Stations(con, cfg, clock)
-        self.instance = Instance(con, cfg)
+        self.instance = Instance(con)
         self._selector, self._selector_factory = None, selector_factory
-        # Per paying account: no GPU batch before this time after a failed one.
+        # Per GPU account: no batch before this time after a failed one.
         self.retry_at = {}
 
     @property
@@ -187,27 +186,16 @@ class Service:
         """Message of a stopped worker that waits for an operator decision, or None."""
         return self.instance.marker(f'recovery:{account}')
 
-    def reusable(self, sha256, account):
-        if not self.con.execute('SELECT 1 FROM analyses WHERE sha256=?', (sha256,)).fetchone():
-            return False
-        return self.instance.get().share_analyses or self.con.execute(
-            'SELECT 1 FROM analysis_accounts WHERE sha256=? AND account=?', (sha256, account)).fetchone() is not None
-
-    def account_blocked(self, account):
-        """Why the paying account cannot start a GPU batch now, or None."""
-        if self.clock() < self.retry_at.get(account, 0.):
-            return 'waiting for GPU retry'
-        return self.gpus.blocked(account)
-
-    def station_blocked(self, settings):
-        if (settings.account == SHARED and settings.shared_cap_usd
-                and station_spend(self.con, SHARED, settings.id, self.clock()) >= settings.shared_cap_usd):
-            return 'station limit on the instance key reached'
-        return None
+    def reusable(self, sha256):
+        """An identical file was analyzed before, for any station."""
+        return self.con.execute('SELECT 1 FROM analyses WHERE sha256=?', (sha256,)).fetchone() is not None
 
     def blocked(self, settings):
         """Why the station's songs cannot start a GPU batch now, or None."""
-        return self.account_blocked(settings.account) or self.station_blocked(settings)
+        blocked = self.gpus.blocked(settings.id)
+        if blocked is None and self.clock() < self.retry_at.get(self.gpus.account(settings.id), 0.):
+            return 'waiting for GPU retry'
+        return blocked
 
     def _candidates(self, stations, forced):
         """Pending rows in queue order with whether their station may use the GPU now.
@@ -217,16 +205,15 @@ class Service:
         """
         if not stations:
             return
-        accounts = {s.account for s in stations.values()}
-        account_ok = {a: self.account_blocked(a) is None for a in accounts}
-        gpu = {i: account_ok[s.account] and self.station_blocked(s) is None for i, s in stations.items()}
+        gpu = {i: self.blocked(s) is None for i, s in stations.items()}
+        accounts = {i: self.gpus.account(i) for i in stations}
         query = (f"SELECT * FROM media WHERE status='pending' AND station_id IN ({','.join('?' * len(stations))}) "
                  f"AND (intro_end IS NULL OR station_id IN ({','.join('?' * len(forced)) or 'NULL'})) "
                  'ORDER BY priority, discovered_at, station_id, media_id')
         for row in self.con.execute(query, (*stations, *forced)).fetchall():
-            settings = stations[row['station_id']]
-            if gpu[settings.id] or row['sha256'] is None or self.reusable(row['sha256'], settings.account):
-                yield row, settings, gpu[settings.id]
+            station_id = row['station_id']
+            if gpu[station_id] or row['sha256'] is None or self.reusable(row['sha256']):
+                yield row, accounts[station_id], gpu[station_id]
 
     def _eligible(self, force=False, force_publish=False):
         requests = self.requests()
@@ -235,14 +222,13 @@ class Service:
         return stations, forced, requests
 
     def ready(self, force=False, force_publish=False):
-        """(rows, account): one paying account's songs, plus songs of others that need no GPU yet."""
+        """(rows, account): songs for one GPU account, plus songs of others that need no GPU yet."""
         stations, forced, requests = self._eligible(force, force_publish)
         account, rows = None, []
-        for row, settings, gpu in self._candidates(stations, forced):
+        for row, station_account, gpu in self._candidates(stations, forced):
             if gpu and account is None:
-                account = settings.account
-            if (not gpu or settings.account == account or row['sha256'] is None
-                    or self.reusable(row['sha256'], settings.account)):
+                account = station_account
+            if not gpu or station_account == account or row['sha256'] is None or self.reusable(row['sha256']):
                 rows.append(row)
                 if len(rows) >= self.cfg.batch_max_songs:
                     break
@@ -275,10 +261,9 @@ class Service:
                 with self.con:
                     self.con.execute('UPDATE media SET sha256=?, updated_at=? WHERE station_id=? AND media_id=?',
                                      (sha256, self.clock(), media['station_id'], media['media_id']))
-                media_account = self.settings.get(media['station_id']).account
-                if self.reusable(sha256, media_account):
+                if self.reusable(sha256):
                     self._finish(media, sha256, publish_forced)
-                elif media_account == account:
+                elif account is not None and self.gpus.account(media['station_id']) == account:
                     waiting.setdefault(sha256, []).append((media, publish_forced))
             for path in songs.glob('*'):
                 if path.name.split('.')[0] not in waiting:
@@ -340,8 +325,7 @@ class Service:
             for sha256, (row, tune) in complete.items():
                 self.con.execute('INSERT OR REPLACE INTO analyses(sha256, source, run_id, report, music, created_at) '
                                  'VALUES(?,?,?,?,?,?)', (sha256, 'pod', run_id, pack(row), pack(tune), self.clock()))
-                self.con.execute('INSERT OR IGNORE INTO analysis_accounts(sha256, account) VALUES(?,?)',
-                                 (sha256, account))
+
             self.con.execute('UPDATE runs SET status=?, finished_at=?, error=?, pod_id=? WHERE id=?',
                              ('complete' if not failed else 'partial', self.clock(),
                               json.dumps(failed)[:2000] if failed else None,

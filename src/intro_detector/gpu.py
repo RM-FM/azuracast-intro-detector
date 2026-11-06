@@ -20,7 +20,7 @@ import subprocess
 import time
 import uuid
 
-from .stations import SHARED, account_station
+from .stations import key_account, key_slot
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ class KeepPodRunning(GpuError):
 
 
 class MissingKey(GpuError):
-    """The paying account has no Runpod API key."""
+    """No station holds a Runpod API key for this account."""
 
 
 class WorkerNeedsRecovery(GpuError):
@@ -154,10 +154,10 @@ def account_spend(con, account, now):
     return month_spend(con.execute('SELECT * FROM pods WHERE account=?', (account,)).fetchall(), now)
 
 
-def station_spend(con, account, station_id, now):
-    """Estimated share of the account's spend this month, split per Pod by analyzed songs."""
+def station_spend(con, station_id, now):
+    """Estimated GPU spend of a station this month, each Pod split by the songs it analyzed per station."""
     total = 0.
-    for pod in con.execute('SELECT * FROM pods WHERE account=?', (account,)).fetchall():
+    for pod in con.execute('SELECT * FROM pods').fetchall():
         cost = month_spend([pod], now)
         if not cost:
             continue
@@ -170,7 +170,7 @@ def station_spend(con, account, station_id, now):
 
 class Runpod:
     def __init__(self, settings, con, data_dir, call=None, sleep=time.sleep, clock=time.time,
-                 account=SHARED, api_key=None):
+                 account='default', api_key=None):
         env = None if api_key is None else {**os.environ, 'RUNPOD_API_KEY': api_key}
         self.call = call or functools.partial(run_command, env=env)
         self.cfg, self.con, self.sleep, self.clock = settings, con, sleep, clock
@@ -181,7 +181,7 @@ class Runpod:
 
     @property
     def lock_path(self):
-        return self.data_dir / ('.gpu.lock' if self.account == SHARED else f'.gpu-{self.account}.lock')
+        return self.data_dir / f'.gpu-{self.account}.lock'
 
     # -- runpodctl -------------------------------------------------------
     def _json(self, command):
@@ -454,30 +454,57 @@ class Runpod:
             return 'retired'
 
 
+BALANCE_SECONDS = 600
+
+
 class Workers:
-    """One Runpod worker per paying account, each with its own key, budget and worker name."""
+    """One Runpod worker per Runpod key; stations that enter the same key share its worker."""
 
     def __init__(self, cfg, con, stations, instance, secrets, call=None, sleep=time.sleep, clock=time.time):
         self.cfg, self.con, self.stations, self.instance, self.secrets = cfg, con, stations, instance, secrets
         self.call, self.sleep, self.clock = call, sleep, clock
         self._workers, self._checked = {}, {}
 
+    def account(self, station_id):
+        """The GPU account a station's songs run on, or None without a Runpod key."""
+        key = self.secrets.get(key_slot(station_id))
+        return key_account(key) if key else None
+
+    def accounts(self):
+        return {key_account(key) for key in self.secrets.keys()}
+
+    def key_stations(self, account):
+        """Number of stations that entered the key of this account."""
+        return sum(1 for slot in self.secrets.slots() if key_account(self.secrets.get(slot)) == account)
+
+    def balance(self, account, refresh=False):
+        """Prepaid Runpod balance of the key's account, checked at most every BALANCE_SECONDS."""
+        cached = self.instance.marker(f'balance:{account}')
+        if not refresh and cached and self.clock() - cached['checked_at'] < BALANCE_SECONDS:
+            return cached
+        try:
+            value = float(self.get(account)._json(['runpodctl', 'user'])['clientBalance'])
+        except (GpuError, KeyError, TypeError, ValueError) as error:
+            log.warning('Runpod balance of %s unavailable: %s', account, error)
+            return cached
+        cached = dict(balance_usd=round(value, 2), checked_at=self.clock())
+        self.instance.set_marker(f'balance:{account}', cached)
+        return cached
+
+    def worker_name(self, account):
+        names = self.instance.marker('worker_names') or {}
+        return names.get(account) or f'{self.cfg.runpod.worker_name}-{account.removeprefix("runpod-")[:8]}'
+
     def settings(self, account):
-        instance = self.instance.get()
-        if account == SHARED:
-            budget, name = instance.shared_budget_usd, self.cfg.runpod.worker_name
-        else:
-            budget = self.stations.get(account_station(account)).budget_usd
-            name = f'{self.cfg.runpod.worker_name}-{account}'
-        return dataclasses.replace(self.cfg.runpod, max_price_per_hour=instance.max_price_per_hour,
-                                   monthly_budget_usd=budget, worker_name=name)
+        # Budgets belong to stations and are checked before a batch; the account itself has no limit.
+        return dataclasses.replace(self.cfg.runpod, monthly_budget_usd=0., worker_name=self.worker_name(account))
 
     def get(self, account):
-        key = self.secrets.get(account)
+        key = next((k for k in self.secrets.keys() if key_account(k) == account), None)
         if key is None:
-            raise MissingKey(f'No Runpod API key for {account}')
+            raise MissingKey('No station holds the Runpod key of this worker any more')
         worker = self._workers.get(account)
-        if worker is None or worker.api_key != key:
+        if worker is None:
             worker = self._workers[account] = Runpod(
                 self.settings(account), self.con, self.cfg.data_dir, call=self.call, sleep=self.sleep,
                 clock=self.clock, account=account, api_key=key)
@@ -488,12 +515,12 @@ class Workers:
     def spend(self, account):
         return account_spend(self.con, account, self.clock())
 
-    def blocked(self, account):
-        """Why the account cannot start a GPU batch now, or None."""
-        if not self.secrets.has(account):
+    def blocked(self, station_id):
+        """Why the station cannot start a GPU batch now, or None."""
+        if self.account(station_id) is None:
             return 'no Runpod key'
-        budget = self.settings(account).monthly_budget_usd
-        if budget and self.spend(account) >= budget:
+        budget = self.stations.get(station_id).budget_usd
+        if budget and station_spend(self.con, station_id, self.clock()) >= budget:
             return 'monthly budget reached'
         return None
 
@@ -503,7 +530,7 @@ class Workers:
     def idle_tick(self):
         """Retire idle workers; accounts without an open worker are checked once per poll interval."""
         now, open_accounts = self.clock(), self.open_accounts()
-        for account in sorted(set(self.secrets.accounts()) | open_accounts):
+        for account in sorted(self.accounts() | open_accounts):
             if account not in open_accounts and now - self._checked.get(account, -math.inf) < self.cfg.poll_seconds:
                 continue
             self._checked[account] = now
@@ -511,3 +538,5 @@ class Workers:
                 self.get(account).idle_tick()
             except GpuError as error:
                 log.warning('Idle guard for %s: %s', account, error)
+            if account in self.accounts():
+                self.balance(account)

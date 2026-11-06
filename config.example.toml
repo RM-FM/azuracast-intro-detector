@@ -60,9 +60,9 @@ music_max_seconds = 27.0
 [runpod]
 # Runpod registry entry for a private GPU image (`runpodctl registry list`); empty for a public image.
 registry_auth_id = ""
-# Defaults for the server's shared Runpod key: estimated GPU spend per UTC month (0 disables the limit)
-# and the highest hourly GPU price. Both can be changed on the Intro Detector page.
-monthly_budget_usd = 50.0
+# Initial monthly GPU budget of a newly enabled station (US$, UTC month; 0 disables the limit);
+# each station changes its own on the Intro Detector page. Highest hourly GPU price for all workers.
+monthly_budget_usd = 10.0
 max_price_per_hour = 0.90
 # Prepared image (gpu/Dockerfile): environments and all pinned models baked in.
 image = "ghcr.io/rm-fm/azuracast-intro-detector-gpu:v1"

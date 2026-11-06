@@ -98,10 +98,7 @@ CREATE TABLE IF NOT EXISTS station_settings(
   mode TEXT NOT NULL DEFAULT 'shadow',
   min_song_seconds REAL NOT NULL,
   exclude_playlists TEXT NOT NULL DEFAULT '[]',
-  billing TEXT NOT NULL DEFAULT 'own',
   budget_usd REAL NOT NULL,
-  shared_allowed INTEGER NOT NULL DEFAULT 0,
-  shared_cap_usd REAL NOT NULL DEFAULT 0,
   auto_process INTEGER NOT NULL DEFAULT 1,
   updated_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS instance_settings(
@@ -112,10 +109,6 @@ CREATE TABLE IF NOT EXISTS run_stations(
   station_id INTEGER NOT NULL,
   songs INTEGER NOT NULL,
   PRIMARY KEY(run_id, station_id));
-CREATE TABLE IF NOT EXISTS analysis_accounts(
-  sha256 TEXT NOT NULL,
-  account TEXT NOT NULL,
-  PRIMARY KEY(sha256, account));
 CREATE TABLE IF NOT EXISTS process_requests(
   station_id INTEGER PRIMARY KEY,
   force INTEGER NOT NULL DEFAULT 0,
@@ -126,7 +119,7 @@ CREATE TABLE IF NOT EXISTS station_jobs(
   requested_at REAL NOT NULL,
   PRIMARY KEY(station_id, kind));
 '''
-# Columns added after the first release; existing rows belong to the shared account.
+# Columns added after the first release; the migration assigns existing rows to the key's account.
 COLUMNS = (('pods', 'account', "TEXT NOT NULL DEFAULT 'shared'"),
            ('runs', 'account', "TEXT NOT NULL DEFAULT 'shared'"),
            ('runs', 'phase', 'TEXT'))

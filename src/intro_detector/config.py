@@ -74,8 +74,8 @@ class Runpod:
     ssh_minutes: int = 20
     max_run_minutes: int = 240
     poll_seconds: int = 30
-    # Estimated GPU spend per calendar month (UTC); 0 disables the limit.
-    monthly_budget_usd: float = 50.0
+    # Initial monthly GPU budget of a station (estimated spend per UTC month; 0 disables the limit).
+    monthly_budget_usd: float = 10.0
 
 
 @dataclass(frozen=True)

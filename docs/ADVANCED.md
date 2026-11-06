@@ -102,9 +102,9 @@ Worker-image changes are separate from service updates and do not require
 reanalyzing unchanged audio automatically.
 
 The first start of 1.0 moves an existing configuration into the station settings:
-stations selected in `config.toml` stay enabled with their mode and filters, the Runpod
-key from `.env` becomes the server's shared key and those stations pay with it. Later
-changes to station sections in `config.toml` have no effect.
+stations selected in `config.toml` stay enabled with their mode and filters and each
+gets the Runpod key from `.env`. Later changes to station sections in `config.toml`
+have no effect.
 
 ## Configuration reference
 
@@ -128,12 +128,11 @@ or with `intro-detector station set`. Settings per station:
 | `auto_process` | `[scan] auto_process` | Analyze new uploads without "Process now" |
 | `min_song_seconds` | `[station_defaults]`, `60` | Skip shorter files and files of unknown length |
 | `exclude_playlists` | `[station_defaults]`, `[]` | Additional playlist IDs excluded from analysis |
-| `billing` | `own` | `own` Runpod key or the server's `shared` key |
-| `budget_usd` | `10` | Monthly budget of the station's own key; `0` means none |
+| `budget_usd` | `[runpod] monthly_budget_usd`, `10` | Monthly GPU budget of the station; `0` means none |
 
-Administrators set `shared_allowed` and `shared_cap_usd` (the station's monthly limit
-on the shared key; `0` leaves only the shared budget). `[azuracast] stations` and
-`[[stations]]` blocks are read only once, when an existing installation is migrated.
+Each station also has its own Runpod key (`intro-detector key set <station>`).
+`[azuracast] stations` and `[[stations]]` blocks are read only once, when an existing
+installation is migrated.
 
 Jingle Mode playlists are always excluded. The detector's AzuraCast account gets
 station **View** and **Media** from the plugin when a station is enabled. Never give the
@@ -155,9 +154,10 @@ are recorded but not automatically reanalyzed. `backfill` queues existing blank 
 at lower priority. "Process now" (`process --station`) skips the quiet period for one
 station, also when automatic processing is off.
 
-A batch contains the songs of one paying account. Songs of an account without key,
-with an exhausted budget or after a failed batch wait; they are downloaded once to
-learn their audio hash, so an analysis stored for another station is still reused.
+A batch contains the songs of stations with the same Runpod key. Songs of a station
+without key, with an exhausted budget or after a failed batch on its key wait; they are
+downloaded once to learn their audio hash, so an analysis stored for another station
+is still reused.
 
 ### Decision settings
 
@@ -193,33 +193,33 @@ Switch off **Analyze new uploads automatically** when uploads should wait for "P
 now". This is independent of the publishing mode: shadow-mode analysis still costs
 money when it needs a GPU.
 
-## Paying accounts and the management API
+## Runpod keys and the management API
 
-Each station pays with its own Runpod key and monthly budget. An administrator can
-also store a shared key with its own budget and allow single stations to use it, each
-with an optional monthly limit. Every paying account has its own worker
-(`azuracast-intro-detector` for the shared key, `azuracast-intro-detector-station-N`
-otherwise), lock, budget and spend estimate; a station's share of a shared worker is
-estimated from its analyzed songs. Keys are checked with Runpod before they are stored
-in `secrets.json` (mode 600) in the data volume and reach `runpodctl` only through its
-environment. A key cannot be removed while its account has an active worker.
+Every station enters a Runpod key and a monthly budget. Several stations may enter the
+same key or each use its own. Stations with the same key share one worker
+(`azuracast-intro-detector-` and eight characters of the key's hash), lock and
+balance; each worker's cost is split between its stations by analyzed songs, and each
+station's share counts against its own budget. Keys are checked with Runpod before they
+are stored in `secrets.json` (mode 600) in the data volume and reach `runpodctl` only
+through its environment. A station cannot remove or replace a key while a worker runs
+on it and no other station uses that key.
 
-Stored analyses are reused for identical files across stations. With
-`share_analyses = false` a station's account pays for its own analysis of a file that
-another account analyzed.
+Stored analyses are reused for identical files across stations; a file is analyzed and
+paid for only once.
 
 The service starts the management API on port 8080 when `INTRO_DETECTOR_API_TOKEN` is
-set. Every request needs `Authorization: Bearer <token>`; the API never returns keys.
-It serves `/api/v1/health`, `/api/v1/instance` (shared key, budget, price cap, sharing,
-station allowances) and `/api/v1/stations/{id}` (settings, key, status, process, retry,
-backfill, publish preview, publish and worker retirement). The Sweepers plugin enforces
-AzuraCast permissions before calling it; do not expose the port elsewhere.
+set. Every request needs that bearer token; the API never returns keys. It serves
+`/api/v1/health`, `/api/v1/stations` (IDs and whether enabled) and `/api/v1/stations/{id}` (settings, key, status, process, retry,
+backfill, publish preview, publish and worker retirement). A station's status includes
+the number of stations using its key, their combined spend this month and the key's
+Runpod balance (checked every ten minutes). The Sweepers plugin enforces AzuraCast
+permissions before calling the API; do not expose the port elsewhere.
 
 ## Automatic GPU workers
 
 The repository supplies the default worker-image reference and is responsible for
 preparing, testing and publishing it before an operator release. Stations and
-administrators provide Runpod keys on the Intro Detector page; they do not build worker
+station managers provide Runpod keys on the Intro Detector page; they do not build worker
 images, choose CUDA packages or configure registry credentials for the standard installation.
 
 Setup verifies that the default public image is accessible anonymously before changing
@@ -248,17 +248,19 @@ downloads, provider billing and changing rates can add cost.
 Previously analyzed audio is reused by SHA256 across stations without GPU inference.
 The detector host's own hosting and storage costs are separate.
 
-Budgets and the hourly price cap are set on the Intro Detector page. The values in
-`[runpod]` are the defaults for the shared key's budget and the price cap:
+Budgets are set per station on the Intro Detector page. `[runpod]` holds the initial
+budget of a newly enabled station and the hourly price cap of all workers:
 
 ```toml
-monthly_budget_usd = 50.0
+monthly_budget_usd = 10.0
 max_price_per_hour = 0.90
 ```
 
-Each monthly limit uses estimated spend recorded by this detector for a UTC calendar
-month. `0` disables it. It blocks new worker creation once reached; it is not a
-provider-enforced spending cap and does not account for other Runpod workloads.
+Each station budget uses estimated spend recorded by this detector for a UTC calendar
+month. `0` disables it. It keeps the station's songs out of new batches once reached; it
+is not a provider-enforced spending cap and does not account for other Runpod workloads.
+Runpod itself offers no monthly budget, only the prepaid balance and an hourly
+account spend limit; when the balance is used up, Runpod stops the worker.
 Existing workers, billing delay and ancillary charges can exceed the estimate.
 Manage account funding and billing separately in the Runpod console. Deleting a
 stopped worker keeps its recorded end time. There is no daily-budget setting.
@@ -308,14 +310,13 @@ docker compose exec detector intro-detector check
 docker compose exec detector intro-detector status
 docker compose exec detector intro-detector station show
 docker compose exec detector intro-detector station set 1 enabled=true mode=shadow budget_usd=20
-docker compose exec detector intro-detector instance max_price_per_hour=0.9
-docker compose exec -T detector intro-detector key set station-1 < runpod-key.txt
+docker compose exec -T detector intro-detector key set 1 < runpod-key.txt
 docker compose exec detector intro-detector backfill --station 1 --dry-run
 docker compose exec detector intro-detector backfill --station 1 --limit 100
 docker compose exec detector intro-detector process --station 1
 docker compose exec detector intro-detector decisions --station 1
 docker compose exec detector intro-detector retry --station 1
-docker compose exec detector intro-detector pod status --account station-1
+docker compose exec detector intro-detector pod status --station 1
 ```
 
 Stations enabled from the command line also need AzuraCast access: run
@@ -345,7 +346,7 @@ committed or shared publicly. For a consistent data backup, first stop any worke
 then the service:
 
 ```bash
-docker compose exec detector intro-detector pod stop --account shared
+docker compose exec detector intro-detector pod stop --station 1
 docker compose stop detector
 docker compose run -T --rm --no-deps --entrypoint tar detector -czf - -C /data . > detector-data.tar.gz
 docker compose up -d detector
@@ -360,9 +361,9 @@ Do not delete a worker containing reports that have not been recovered.
 - **API check fails:** verify HTTPS and the AzuraCast key. Missing station permissions
   are only warnings in `check`; the plugin grants them for enabled stations.
 - **Runpod key rejected:** the key must manage Pods; a read-only key is insufficient.
-- **Station blocked:** the Intro Detector page names the reason: no key, budget or
-  station limit reached, a failed batch waiting for its retry, or a stopped worker
-  that needs a decision.
+- **Station blocked:** the Intro Detector page names the reason: no key, budget
+  reached, a failed batch waiting for its retry, or a stopped worker that needs a
+  decision.
 - **No scans:** initial sync does not backfill. Check the pending queue, filters and
   the station's automatic processing; manual stations need "Process now".
 - **No GPU capacity:** check allowed GPU types, speed and hourly price cap. Do not
@@ -373,8 +374,8 @@ Do not delete a worker containing reports that have not been recovered.
 - **Worker SSH failure:** confirm UID 10001 can read the mounted private key. Preserve
   the existing key while its worker is active.
 - **Stopped worker with uncopied reports:** recover the reports before deleting it.
-  Analysis on that account pauses without using up song attempts. Deleting the worker
-  on the Intro Detector page (or `pod delete --force --account …`) discards that protection.
+  Analysis with that key pauses without using up song attempts. Deleting the worker
+  on the Intro Detector page (or `pod delete --force --station …`) discards that protection.
 - **Disk full or SQLite error:** stop new processing, free disposable build/test
   artifacts and retain the data volume. Do not delete the database, WAL or analyses
   to make an error disappear. Restore from a consistent backup only after diagnosis.

@@ -4,8 +4,8 @@ Detects song intros for the [AzuraCast Sweepers](https://github.com/RM-FM/azurac
 plugin. It runs next to AzuraCast and rents Runpod GPU workers when a song needs
 analysis. No local GPU is required.
 
-Each station switches it on in **Sweepers → Intro Detector** and pays with its own
-Runpod account and monthly budget. Stations start in **shadow mode**: proposed intro
+Each station switches it on in **Sweepers → Intro Detector** with a Runpod API key and
+a monthly budget. Stations start in **shadow mode**: proposed intro
 values are recorded, not written to AzuraCast. Intro values entered by hand are
 never overwritten.
 
@@ -51,6 +51,10 @@ For installation without the plugin's setup, see [manual installation](docs/ADVA
   a **Read Only** key cannot create or stop workers. You do not need an S3 key.
 4. Keep the key in a password manager; it is entered only on the detector page.
 
+Use one key for several stations or a separate key per station, whichever suits how
+you pay for them. Stations with the same key share one GPU worker; each station
+keeps its own monthly budget.
+
 #### Enable the station
 
 1. Open **Sweepers → Intro Detector** for the station. Changing it needs the station's
@@ -66,15 +70,14 @@ For installation without the plugin's setup, see [manual installation](docs/ADVA
   publish the intros found so far.
 6. Validate station playback with sweepers before leaving publishing enabled.
 
-System administrators can instead offer a shared Runpod account to stations,
-each with a monthly limit, in the page's Shared Account section; stations see it as provided by the server administrator.
 
 ## Everyday use
 
 New or replaced files are discovered automatically. The detector page shows the queue,
-failed songs, recent batches, this month's GPU cost and the running worker.
-Previously analyzed audio is reused across stations unless the administrator turns
-sharing off.
+failed songs, recent batches, the station's GPU cost this month and the Runpod balance
+of its key. If several stations use the same key, it also shows how many and their
+combined cost this month. An identical file that was already analyzed for any
+station is reused without GPU cost.
 
 For logs on the server:
 

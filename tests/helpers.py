@@ -13,7 +13,7 @@ from intro_detector.stations import StationSettings, Stations  # noqa: E402
 
 
 def make_config(root, *stations, **extra):
-    return Config(base_url='https://radio.example', api_key='secret', runpod=Runpod(),
+    return Config(base_url='https://radio.example', api_key='secret', runpod=extra.pop('runpod', Runpod()),
                   stations=stations or (Station(1, 'publish'),), data_dir=Path(root), **extra)
 
 
@@ -33,15 +33,27 @@ def enable(con, cfg, *stations, **settings):
 
 
 class FakeWorkers:
-    """One fake GPU serving every paying account; blocked accounts can be scripted."""
-    blocked_accounts = {}
+    """One fake GPU for every Runpod key; station keys and blocked stations can be scripted."""
+    keys = {}
+    blocked_stations = {}
+
+    def account(self, station_id):
+        return self.keys.get(station_id, 'runpod-test')
 
     def get(self, account):
         self.accounts = getattr(self, 'accounts', []) + [account]
         return self
 
-    def blocked(self, account):
-        return self.blocked_accounts.get(account)
+    def blocked(self, station_id):
+        if self.account(station_id) is None:
+            return 'no Runpod key'
+        return self.blocked_stations.get(station_id)
+
+    def key_stations(self, account):
+        return 1
+
+    def balance(self, account, refresh=False):
+        return None
 
     def idle_tick(self):
         return None

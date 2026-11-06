@@ -8,7 +8,6 @@ from intro_detector.gpu import GpuError, NoCapacity, WorkerNeedsRecovery
 from intro_detector.library import sync_station
 from intro_detector import status
 from intro_detector.service import Service
-from intro_detector.stations import SHARED, station_account
 
 
 class FakeSelector:
@@ -22,9 +21,9 @@ class FakeSelector:
 
 
 class FakeGpu(FakeWorkers):
-    def __init__(self, drop=(), error=None, blocked=None):
+    def __init__(self, drop=(), error=None, blocked=None, keys=None):
         self.drop, self.error, self.batches = set(drop), error, []
-        self.blocked_accounts = dict(blocked or {})
+        self.blocked_stations, self.keys = dict(blocked or {}), dict(keys or {})
         self.during = None
 
     def run(self, songs, output, progress=None):
@@ -106,11 +105,11 @@ class Processing(QueueCase):
         self.clock.now += 61
         service.process()
         self.assertEqual(len(gpu.batches), 1)
-        self.assertEqual(gpu.accounts, [station_account(1)])
+        self.assertEqual(gpu.accounts, ['runpod-test'])
         self.assertEqual(sorted(self.client.writes), [(1, 2, 14.2), (1, 3, 0.)])
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM media WHERE status='done'").fetchone()[0], 2)
         run = self.con.execute('SELECT account FROM runs').fetchone()
-        self.assertEqual(run['account'], station_account(1))
+        self.assertEqual(run['account'], 'runpod-test')
         self.assertEqual(tuple(self.con.execute('SELECT station_id, songs FROM run_stations').fetchone()), (1, 2))
 
     def test_pending_intro_is_skipped_unless_force_is_requested(self):
@@ -217,7 +216,7 @@ class Processing(QueueCase):
         self.clock.now += 61
         service.process()
         self.assertEqual(self.status(1, 2)[:2], ('pending', 0))
-        self.assertEqual(service.recovery(station_account(1)), 'stopped with unconfirmed evidence')
+        self.assertEqual(service.recovery('runpod-test'), 'stopped with unconfirmed evidence')
 
     def test_jobs_run_once_for_enabled_stations(self):
         service = self.service(FakeGpu(), {})
@@ -235,7 +234,7 @@ class Processing(QueueCase):
 
 
 class Accounts(QueueCase):
-    """Two stations that pay with their own Runpod accounts or share the instance key."""
+    """Two stations with their own Runpod keys or with the same key."""
 
     def setUp(self):
         self.tmp = tempdir()
@@ -244,26 +243,37 @@ class Accounts(QueueCase):
         self.client = FakeClient([media(1)])
         self.configure(Station(1, 'publish'), Station(2, 'publish'), batch_quiet_seconds=0)
 
-    def test_one_paying_account_per_batch(self):
-        gpu = FakeGpu()
+    def test_one_key_per_batch_and_identical_files_are_reused(self):
+        gpu = FakeGpu(keys={1: 'runpod-a', 2: 'runpod-b'})
         service = self.service(gpu, {sha(5): 3.})
         self.upload(5)
         service.process()
         self.assertEqual(self.status(2, 5), ('pending', 0, sha(5)))
         service.process()
-        self.assertEqual(gpu.accounts, [station_account(1)])
+        self.assertEqual(gpu.accounts, ['runpod-a'])
         self.assertEqual(self.status(2, 5)[0], 'done')
         self.assertEqual(self.con.execute('SELECT state FROM publications WHERE station_id=2').fetchone()[0],
                          'matching')
         self.assertEqual(len(gpu.batches), 1)
 
-    def test_blocked_account_downloads_once_then_waits(self):
-        gpu = FakeGpu(blocked={station_account(1): 'no Runpod key'})
+    def test_stations_with_the_same_key_share_a_batch(self):
+        gpu = FakeGpu()
         service = self.service(gpu, {sha(5): 3., sha(6): 4.})
+        self.upload(5, 6)
+        service.process()
+        self.assertEqual((gpu.accounts, len(gpu.batches), len(gpu.batches[0])), (['runpod-test'], 1, 2))
+        self.assertEqual(sorted(tuple(r) for r in self.con.execute('SELECT station_id, songs FROM run_stations')),
+                         [(1, 2), (2, 2)])
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM media WHERE status='done'").fetchone()[0], 4)
+
+    def test_station_without_key_downloads_once_then_waits(self):
+        gpu = FakeGpu(keys={1: None, 2: 'runpod-b'})
+        service = self.service(gpu, {sha(5): 3., sha(6): 4.})
+        self.assertEqual(service.blocked(service.settings.get(1)), 'no Runpod key')
         self.upload(5)
         service.process()
         service.process()
-        self.assertEqual(gpu.accounts, [station_account(2)])
+        self.assertEqual(gpu.accounts, ['runpod-b'])
         self.assertEqual(self.status(1, 5)[0], 'done')
         gpu.accounts = []
         self.client.files[6] = media(6, path='6.mp3')
@@ -275,30 +285,13 @@ class Accounts(QueueCase):
         self.assertEqual(service.process(), 'idle')
         self.assertEqual(downloads, [])
 
-    def test_analyses_are_not_shared_when_switched_off(self):
-        gpu = FakeGpu()
-        service = self.service(gpu, {sha(5): 3.})
-        service.instance.update({'share_analyses': False})
+    def test_failed_batch_pauses_only_its_key(self):
+        gpu = FakeGpu(error=NoCapacity('none'), keys={1: 'runpod-a', 2: 'runpod-b'})
+        service = self.service(gpu, {})
         self.upload(5)
         service.process()
-        service.process()
-        self.assertEqual(gpu.accounts, [station_account(1), station_account(2)])
-        accounts = {r[0] for r in self.con.execute('SELECT account FROM analysis_accounts WHERE sha256=?', (sha(5),))}
-        self.assertEqual(accounts, {station_account(1), station_account(2)})
-
-    def test_station_limit_on_the_instance_key(self):
-        enable(self.con, self.cfg, Station(1, 'publish'), billing='shared', shared_allowed=True, shared_cap_usd=1.)
-        enable(self.con, self.cfg, Station(2, 'publish'), billing='shared', shared_allowed=True)
-        with self.con:
-            self.con.execute("INSERT INTO pods(pod_id, price, created_at, ended_at, account) VALUES('p', 20, ?, ?, ?)",
-                             (self.clock() - 3600, self.clock(), SHARED))
-            self.con.execute("INSERT INTO runs(id, pod_id, songs, status, started_at, account) "
-                             "VALUES('r', 'p', 4, 'complete', ?, ?)", (self.clock() - 3000, SHARED))
-            self.con.executemany("INSERT INTO run_stations VALUES('r', ?, ?)", [(1, 3), (2, 1)])
-        service = self.service(FakeGpu(), {})
-        self.assertEqual(service.blocked(service.settings.get(1)), 'station limit on the instance key reached')
+        self.assertEqual(service.blocked(service.settings.get(1)), 'waiting for GPU retry')
         self.assertIsNone(service.blocked(service.settings.get(2)))
-
 
 class Progress(QueueCase):
     def setUp(self):
@@ -309,7 +302,7 @@ class Progress(QueueCase):
         self.configure(Station(1, 'publish'), Station(2, 'publish'), batch_quiet_seconds=0)
 
     def test_running_batch_reports_its_step_to_its_own_stations_only(self):
-        gpu = FakeGpu()
+        gpu = FakeGpu(keys={1: 'runpod-a', 2: 'runpod-b'})
         service = self.service(gpu, {sha(5): 3.})
         gpu.observe = lambda: (status.activity(service, 1), status.activity(service, 2))
         self.upload(5)

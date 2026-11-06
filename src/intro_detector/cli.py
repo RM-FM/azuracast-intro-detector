@@ -14,10 +14,10 @@ import time
 from . import api, config as config_module
 from .azuracast import AzuraCastError, Client
 from .db import audit, connect
-from .gpu import GpuError, Workers, account_spend
+from .gpu import GpuError, Workers, station_spend
 from .library import backfill
 from .service import Service
-from .stations import SHARED, Instance, Secrets, Stations, migrate
+from .stations import Instance, Secrets, Stations, key_slot, migrate
 
 REVIEW_KINDS = {'instrumental': 'instrumental', 'clear-opening': 'clear_opening'}
 log = logging.getLogger(__name__)
@@ -27,9 +27,9 @@ def build(cfg, environ=None):
     """Service with its stores; migrates 0.x settings on first use."""
     con = connect(cfg.db_path)
     client = Client(cfg.base_url, cfg.api_key, cfg.timeout_seconds)
-    stations, instance, secrets = Stations(con, cfg, time.time), Instance(con, cfg), Secrets(cfg.data_dir)
+    stations, instance, secrets = Stations(con, cfg, time.time), Instance(con), Secrets(cfg.data_dir)
     if migrate(con, cfg, stations, instance, secrets, os.environ if environ is None else environ):
-        log.info('Migrated configured stations and the Runpod key to managed station settings')
+        log.info('Migrated the stored settings; each station now holds its own Runpod key')
     return Service(cfg, con, client, Workers(cfg, con, stations, instance, secrets))
 
 
@@ -123,10 +123,12 @@ def cmd_status(args):
     service = _service(args)
     con = service.con
     requests = service.requests()
+    now = time.time()
     for s in service.settings.all():
         state = 'enabled' if s.enabled else 'disabled'
         print(f'station {s.id:>3}  {state:<8} {s.mode:<7} {"auto" if s.auto_process else "manual":<6} '
-              f'pays: {s.account}' + (' (process requested)' if s.id in requests else '')
+              f'GPU {service.gpus.account(s.id) or "no key"}, {station_spend(con, s.id, now):.2f} of '
+              f'{s.budget_usd or "unlimited"} USD this month' + (' (process requested)' if s.id in requests else '')
               + (f'  blocked: {service.blocked(s)}' if s.enabled and service.blocked(s) else ''))
     for row in con.execute('SELECT station_id, status, COUNT(*) n FROM media GROUP BY station_id, status ORDER BY 1, 2'):
         print(f'station {row["station_id"]:>3}  {row["status"]:<9} {row["n"]}')
@@ -142,11 +144,10 @@ def cmd_status(args):
                            'GROUP BY p.gpu_id'):
         print(f'{row["gpu_id"] or "unknown GPU"}: {row["runs"]} batches, {row["songs"]} songs, '
               f'{row["seconds"] / max(row["songs"], 1):.1f} s/song')
-    accounts = set(service.gpus.secrets.accounts()) | {r[0] for r in con.execute('SELECT DISTINCT account FROM pods')}
+    accounts = service.gpus.accounts() | {r[0] for r in con.execute('SELECT DISTINCT account FROM pods')}
     for account in sorted(accounts):
-        budget = service.gpus.settings(account).monthly_budget_usd
-        print(f'account {account}: estimated GPU spend this month {account_spend(con, account, time.time()):.2f} USD '
-              f'(limit {budget or "none"}){"" if service.gpus.secrets.has(account) else ", no key"}')
+        print(f'account {account}: estimated GPU spend this month {service.gpus.spend(account):.2f} USD'
+              + ('' if account in service.gpus.accounts() else ', no station holds its key'))
 
 
 def cmd_ab_select(args):
@@ -268,7 +269,10 @@ def cmd_republish(args):
 
 def cmd_pod(args):
     service = _service(args)
-    gpu = service.gpus.get(args.account)
+    account = service.gpus.account(args.station)
+    if account is None:
+        raise SystemExit(f'Station {args.station} has no Runpod key')
+    gpu = service.gpus.get(account)
     pod = gpu.worker()
     if args.action == 'status' or pod is None:
         print(json.dumps(pod, indent=2) if pod else 'No worker Pod')
@@ -297,28 +301,23 @@ def cmd_station(args):
     if args.action == 'set':
         if args.id is None:
             raise SystemExit('station set needs a station ID')
-        service.settings.update(args.id, _assignments(args.values), admin=True)
+        service.settings.update(args.id, _assignments(args.values))
     for settings in ([service.settings.get(args.id)] if args.id is not None else service.settings.all()):
         print(json.dumps(settings.public()))
 
 
-def cmd_instance(args):
-    instance = _service(args).instance
-    if args.values:
-        instance.update(_assignments(args.values))
-    print(json.dumps(instance.get().__dict__))
-
-
 def cmd_key(args):
     secrets = Secrets(config_module.load(args.config).data_dir)
+    if args.action != 'list' and args.station is None:
+        raise SystemExit(f'key {args.action} needs a station ID')
     if args.action == 'set':
-        secrets.set(args.account, sys.stdin.readline().strip())
-        print(f'Runpod key stored for {args.account}')
+        secrets.set(key_slot(args.station), sys.stdin.readline().strip())
+        print(f'Runpod key stored for station {args.station}')
     elif args.action == 'clear':
-        secrets.set(args.account, None)
-        print(f'Runpod key removed for {args.account}')
+        secrets.set(key_slot(args.station), None)
+        print(f'Runpod key removed for station {args.station}')
     else:
-        print('\n'.join(secrets.accounts()) or 'No Runpod keys')
+        print('\n'.join(secrets.slots()) or 'No Runpod keys')
 
 
 def cmd_check(args):
@@ -345,15 +344,15 @@ def cmd_check(args):
         print(f'  station {settings.id:>3}  {settings.mode:<8} {names[settings.id]}')
     if not enabled:
         print('No station enabled yet; enable stations in Sweepers > Intro Detector')
-    secrets = service.gpus.secrets
-    for account in secrets.accounts():
+    for account in sorted(service.gpus.accounts()):
+        stations = [s.id for s in service.settings.all() if service.gpus.account(s.id) == account]
         reply = service.gpus.get(account).call(['runpodctl', 'pod', 'list', '--all'], check=False)
         if reply.returncode:
-            problems.append(f'Runpod rejected the {account} key; check the key and its permissions')
+            problems.append(f'Runpod rejected the key of stations {stations}; check the key and its permissions')
         else:
-            print(f'Runpod: {account} key accepted')
-    if not secrets.accounts():
-        print('No Runpod key yet; add one in Sweepers > Intro Detector')
+            print(f'Runpod: key of stations {stations} accepted')
+    if not service.gpus.accounts():
+        print('No Runpod key yet; add one per station in Sweepers > Intro Detector')
     if not os.access(cfg.runpod.ssh_key, os.R_OK):
         problems.append(f'SSH key {cfg.runpod.ssh_key} is missing or unreadable')
     for warning in warnings:
@@ -381,17 +380,14 @@ def main(argv=None):
     sub.add_parser('status', help='Stations, queue, runs and GPU spend').set_defaults(func=cmd_status)
     sub.add_parser('check', help='Check configuration, AzuraCast permissions and Runpod keys'
                    ).set_defaults(func=cmd_check)
-    p = sub.add_parser('station', help='Show or change station settings (also those only administrators may set)')
+    p = sub.add_parser('station', help='Show or change station settings')
     p.add_argument('action', choices=('show', 'set'))
     p.add_argument('id', type=int, nargs='?')
-    p.add_argument('values', nargs='*', metavar='NAME=VALUE', help='e.g. enabled=true mode=publish billing=shared')
+    p.add_argument('values', nargs='*', metavar='NAME=VALUE', help='e.g. enabled=true mode=publish budget_usd=20')
     p.set_defaults(func=cmd_station)
-    p = sub.add_parser('instance', help='Show or change instance settings')
-    p.add_argument('values', nargs='*', metavar='NAME=VALUE', help='e.g. max_price_per_hour=0.9')
-    p.set_defaults(func=cmd_instance)
-    p = sub.add_parser('key', help='Runpod API keys per paying account (set reads the key from stdin)')
+    p = sub.add_parser('key', help='Runpod API key of a station (set reads the key from stdin)')
     p.add_argument('action', choices=('list', 'set', 'clear'))
-    p.add_argument('account', nargs='?', default=SHARED, help='shared (default) or station-ID')
+    p.add_argument('station', type=int, nargs='?')
     p.set_defaults(func=cmd_key)
     p = sub.add_parser('ab-select', help='Choose non-English recordings plus English controls for an A/B test')
     p.add_argument('--name', required=True)
@@ -443,9 +439,9 @@ def main(argv=None):
     p.add_argument('--force', action='store_true',
                    help='Allow replacing an existing intro_end (only when station mode is publish)')
     p.set_defaults(func=cmd_republish)
-    p = sub.add_parser('pod', help='Inspect or retire the GPU worker of a paying account')
+    p = sub.add_parser('pod', help="Inspect or retire the GPU worker of a station's Runpod key")
     p.add_argument('action', choices=('status', 'stop', 'delete'))
-    p.add_argument('--account', default=SHARED, help='shared (default) or station-ID')
+    p.add_argument('--station', type=int, required=True)
     p.add_argument('--force', action='store_true')
     p.set_defaults(func=cmd_pod)
     args = parser.parse_args(argv)
