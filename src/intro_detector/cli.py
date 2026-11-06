@@ -330,16 +330,17 @@ def cmd_check(args):
     except AzuraCastError as error:
         raise SystemExit(f'AzuraCast: connection or API key failed: {error}') from None
     print(f'AzuraCast: connected to {cfg.base_url}; the API key sees {len(names)} stations')
-    problems = []
+    problems, warnings = [], []
     enabled = service.settings.enabled()
+    # The plugin grants station access after setup, so missing station permissions are not fatal here.
     for settings in enabled:
         if settings.id not in names:
-            problems.append(f'Station {settings.id} is not visible: give the API user View permission on it')
+            warnings.append(f'Station {settings.id} is not visible yet: the API user needs View permission on it')
             continue
         try:
             service.client.can_read_media(settings.id)
         except AzuraCastError:
-            problems.append(f'Station {settings.id} ({names[settings.id]}): give the API user Media permission')
+            warnings.append(f'Station {settings.id} ({names[settings.id]}): the API user needs Media permission')
             continue
         print(f'  station {settings.id:>3}  {settings.mode:<8} {names[settings.id]}')
     if not enabled:
@@ -355,6 +356,8 @@ def cmd_check(args):
         print('No Runpod key yet; add one in Sweepers > Intro Detector')
     if not os.access(cfg.runpod.ssh_key, os.R_OK):
         problems.append(f'SSH key {cfg.runpod.ssh_key} is missing or unreadable')
+    for warning in warnings:
+        print(f'WARNING: {warning}')
     for problem in problems:
         print(f'PROBLEM: {problem}')
     if problems:

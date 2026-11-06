@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-usage='Usage: sudo bash bin/update.sh --version vX.Y.Z --azuracast-dir DIR'
+usage='Usage: sudo bash bin/update.sh --version vX.Y.Z --azuracast-dir DIR (optional setup input on stdin)'
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 image=azuracast-intro-detector:local
 version=""
@@ -35,7 +35,7 @@ if docker image inspect "$image" >/dev/null 2>&1; then
 fi
 git -c advice.detachedHead=false checkout --quiet --detach "$target"
 printf 'Updating the Intro Detector to %s...\n' "$version"
-if ! bash bin/setup.sh --azuracast-dir "$azuracast_dir" --unattended < /dev/null; then
+if ! bash bin/setup.sh --azuracast-dir "$azuracast_dir" --unattended; then
     git -c advice.detachedHead=false checkout --quiet --detach "$previous"
     if $had_image; then
         docker image tag azuracast-intro-detector:previous "$image"
