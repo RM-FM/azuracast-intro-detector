@@ -10,3 +10,4 @@ __pycache__/
 /AGENTS.md
 /.setup-backups/
 /.setup-*/
+/compose.override.yaml
