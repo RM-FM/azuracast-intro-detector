@@ -92,7 +92,38 @@ CREATE TABLE IF NOT EXISTS pods(
   ended_at REAL,
   copied INTEGER NOT NULL DEFAULT 0,
   idle_since REAL);
+CREATE TABLE IF NOT EXISTS station_settings(
+  station_id INTEGER PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  mode TEXT NOT NULL DEFAULT 'shadow',
+  min_song_seconds REAL NOT NULL,
+  exclude_playlists TEXT NOT NULL DEFAULT '[]',
+  billing TEXT NOT NULL DEFAULT 'own',
+  budget_usd REAL NOT NULL,
+  shared_allowed INTEGER NOT NULL DEFAULT 0,
+  shared_cap_usd REAL NOT NULL DEFAULT 0,
+  auto_process INTEGER NOT NULL DEFAULT 1,
+  updated_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS instance_settings(
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS run_stations(
+  run_id TEXT NOT NULL,
+  station_id INTEGER NOT NULL,
+  songs INTEGER NOT NULL,
+  PRIMARY KEY(run_id, station_id));
+CREATE TABLE IF NOT EXISTS analysis_accounts(
+  sha256 TEXT NOT NULL,
+  account TEXT NOT NULL,
+  PRIMARY KEY(sha256, account));
+CREATE TABLE IF NOT EXISTS process_requests(
+  station_id INTEGER PRIMARY KEY,
+  force INTEGER NOT NULL DEFAULT 0,
+  requested_at REAL NOT NULL);
 '''
+# Columns added after the first release; existing rows belong to the shared account.
+COLUMNS = (('pods', 'account', "TEXT NOT NULL DEFAULT 'shared'"),
+           ('runs', 'account', "TEXT NOT NULL DEFAULT 'shared'"))
 
 
 def connect(path):
@@ -102,6 +133,10 @@ def connect(path):
     con.execute('PRAGMA journal_mode=WAL')
     con.execute('PRAGMA busy_timeout=30000')
     con.executescript(SCHEMA)
+    for table, column, declaration in COLUMNS:
+        if column not in {row['name'] for row in con.execute(f'PRAGMA table_info({table})')}:
+            con.execute(f'ALTER TABLE {table} ADD COLUMN {column} {declaration}')
+    con.commit()
     return con
 
 

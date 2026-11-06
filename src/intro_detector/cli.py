@@ -5,6 +5,8 @@ import csv
 import fcntl
 import json
 import logging
+import os
+import signal
 import sqlite3
 import sys
 import time
@@ -12,18 +14,27 @@ import time
 from . import config as config_module
 from .azuracast import AzuraCastError, Client
 from .db import audit, connect
-from .gpu import GpuError, Runpod
+from .gpu import GpuError, Workers, account_spend
 from .library import backfill
 from .service import Service
+from .stations import SHARED, Instance, Secrets, Stations, migrate
 
 REVIEW_KINDS = {'instrumental': 'instrumental', 'clear-opening': 'clear_opening'}
+log = logging.getLogger(__name__)
+
+
+def build(cfg, environ=None):
+    """Service with its stores; migrates 0.x settings on first use."""
+    con = connect(cfg.db_path)
+    client = Client(cfg.base_url, cfg.api_key, cfg.timeout_seconds)
+    stations, instance, secrets = Stations(con, cfg, time.time), Instance(con, cfg), Secrets(cfg.data_dir)
+    if migrate(con, cfg, stations, instance, secrets, os.environ if environ is None else environ):
+        log.info('Migrated configured stations and the Runpod key to managed station settings')
+    return Service(cfg, con, client, Workers(cfg, con, stations, instance, secrets))
 
 
 def _service(args):
-    cfg = config_module.load(args.config)
-    con = connect(cfg.db_path)
-    client = Client(cfg.base_url, cfg.api_key, cfg.timeout_seconds)
-    return Service(cfg, con, client, Runpod(cfg.runpod, con, cfg.data_dir))
+    return build(config_module.load(args.config))
 
 
 @contextlib.contextmanager
@@ -55,6 +66,8 @@ def _redecide(service, sha256):
 
 def cmd_run(args):
     service = _service(args)
+    # PID 1 in the container ignores SIGTERM by default; exit at once so "docker stop" is clean.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     with _owner(service.cfg):
         service.run_forever()
 
@@ -83,37 +96,39 @@ def cmd_sync(args):
 
 def cmd_process(args):
     service = _service(args)
+    if args.station is not None and not service.settings.get(args.station).enabled:
+        raise SystemExit(f'Station {args.station} is not enabled')
     service.cfg.data_dir.mkdir(parents=True, exist_ok=True)
     with (service.cfg.data_dir / '.service.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             # The running service owns the queue: hand it the request instead.
-            request = f'{time.time()}\n' + ('force\n' if args.force else '')
-            service.request_path.write_text(request)
-            query = "SELECT COUNT(*) FROM media WHERE status='pending'"
-            if not args.force:
-                query += ' AND intro_end IS NULL'
-            pending = service.con.execute(query).fetchone()[0]
-            print(f'Requested: the running service will process {pending} pending songs '
+            count = service.request(args.station, args.force)
+            print(f'Requested for {count} station(s); the running service processes them '
                   '(watch "docker compose logs -f detector")')
             return
-        service.sync()
-        print(service.process(force=True, force_publish=args.force))
+        service.sync(None if args.station is None else {args.station})
+        service.request(args.station, args.force)
+        print(service.process())
 
 
 def cmd_status(args):
     service = _service(args)
     con = service.con
+    requests = service.requests()
+    for s in service.settings.all():
+        state = 'enabled' if s.enabled else 'disabled'
+        print(f'station {s.id:>3}  {state:<8} {s.mode:<7} {"auto" if s.auto_process else "manual":<6} '
+              f'pays: {s.account}' + (' (process requested)' if s.id in requests else '')
+              + (f'  blocked: {service.blocked(s)}' if s.enabled and service.blocked(s) else ''))
     for row in con.execute('SELECT station_id, status, COUNT(*) n FROM media GROUP BY station_id, status ORDER BY 1, 2'):
         print(f'station {row["station_id"]:>3}  {row["status"]:<9} {row["n"]}')
     for row in con.execute('SELECT station_id, state, COUNT(*) n FROM publications GROUP BY 1, 2 ORDER BY 1, 2'):
         print(f'station {row["station_id"]:>3}  publication {row["state"]:<10} {row["n"]}')
     print(f'analyses: {con.execute("SELECT COUNT(*) FROM analyses").fetchone()[0]}')
-    print('processing: ' + ('automatic' if service.cfg.auto_process else 'manual (intro-detector process)')
-          + (', run requested' if service.request_path.exists() else ''))
     for row in con.execute('SELECT * FROM runs ORDER BY started_at DESC LIMIT 5'):
-        print(f'run {row["id"]} {row["status"]} songs={row["songs"]} '
+        print(f'run {row["id"]} {row["account"]} {row["status"]} songs={row["songs"]} '
               f'{time.strftime("%Y-%m-%d %H:%M", time.gmtime(row["started_at"]))} {row["error"] or ""}'[:300])
     # Observed wall time including Pod start; use it to calibrate runpod.gpus speeds.
     for row in con.execute("SELECT p.gpu_id, COUNT(*) runs, SUM(r.songs) songs, SUM(r.finished_at - r.started_at) seconds "
@@ -121,8 +136,11 @@ def cmd_status(args):
                            'GROUP BY p.gpu_id'):
         print(f'{row["gpu_id"] or "unknown GPU"}: {row["runs"]} batches, {row["songs"]} songs, '
               f'{row["seconds"] / max(row["songs"], 1):.1f} s/song')
-    print(f'estimated GPU spend this month: {service.gpu.spend():.2f} USD '
-          f'(limit {service.cfg.runpod.monthly_budget_usd or "none"})')
+    accounts = set(service.gpus.secrets.accounts()) | {r[0] for r in con.execute('SELECT DISTINCT account FROM pods')}
+    for account in sorted(accounts):
+        budget = service.gpus.settings(account).monthly_budget_usd
+        print(f'account {account}: estimated GPU spend this month {account_spend(con, account, time.time()):.2f} USD '
+              f'(limit {budget or "none"}){"" if service.gpus.secrets.has(account) else ", no key"}')
 
 
 def cmd_ab_select(args):
@@ -186,7 +204,8 @@ def cmd_decision_diff(args):
 
 def cmd_backfill(args):
     service = _service(args)
-    service.cfg.station(args.station)
+    if not service.settings.get(args.station).enabled:
+        raise SystemExit(f'Station {args.station} is not enabled')
     count = backfill(service.con, args.station, args.limit, args.include_set, args.dry_run)
     print(f'{"Would queue" if args.dry_run else "Queued"} {count} songs for station {args.station}')
 
@@ -251,52 +270,91 @@ def cmd_republish(args):
 
 def cmd_pod(args):
     service = _service(args)
-    pod = service.gpu.worker()
+    gpu = service.gpus.get(args.account)
+    pod = gpu.worker()
     if args.action == 'status' or pod is None:
         print(json.dumps(pod, indent=2) if pod else 'No worker Pod')
         return
-    row = service.gpu._row(pod['id'])
+    row = gpu._row(pod['id'])
     if args.action == 'delete' and not (row and row['copied']) and not args.force:
         raise SystemExit('Reports from this Pod were not confirmed as copied; use --force after recovery')
-    service.gpu.retire(pod['id'], delete=args.action == 'delete')
+    gpu.retire(pod['id'], delete=args.action == 'delete')
+
+
+def _assignments(items):
+    values = {}
+    for item in items:
+        name, separator, raw = item.partition('=')
+        if not separator:
+            raise ValueError(f'Expected name=value, got {item!r}')
+        try:
+            values[name] = json.loads(raw)
+        except ValueError:
+            values[name] = raw
+    return values
+
+
+def cmd_station(args):
+    service = _service(args)
+    if args.action == 'set':
+        if args.id is None:
+            raise SystemExit('station set needs a station ID')
+        service.settings.update(args.id, _assignments(args.values), admin=True)
+    for settings in ([service.settings.get(args.id)] if args.id is not None else service.settings.all()):
+        print(json.dumps(settings.public()))
+
+
+def cmd_instance(args):
+    instance = _service(args).instance
+    if args.values:
+        instance.update(_assignments(args.values))
+    print(json.dumps(instance.get().__dict__))
+
+
+def cmd_key(args):
+    secrets = Secrets(config_module.load(args.config).data_dir)
+    if args.action == 'set':
+        secrets.set(args.account, sys.stdin.readline().strip())
+        print(f'Runpod key stored for {args.account}')
+    elif args.action == 'clear':
+        secrets.set(args.account, None)
+        print(f'Runpod key removed for {args.account}')
+    else:
+        print('\n'.join(secrets.accounts()) or 'No Runpod keys')
 
 
 def cmd_check(args):
-    """Verify configuration, AzuraCast access per station and the GPU worker prerequisites."""
-    import os
-    import subprocess
-    cfg = config_module.load(args.config)
-    client = Client(cfg.base_url, cfg.api_key, cfg.timeout_seconds)
+    """Verify configuration, AzuraCast access per enabled station and each Runpod key."""
+    service = _service(args)
+    cfg = service.cfg
     try:
-        names = client.station_names()
+        names = service.client.station_names()
     except AzuraCastError as error:
         raise SystemExit(f'AzuraCast: connection or API key failed: {error}') from None
     print(f'AzuraCast: connected to {cfg.base_url}; the API key sees {len(names)} stations')
     problems = []
-    ids = sorted(set(names) | {s.id for s in cfg.stations}) if cfg.all_stations else [s.id for s in cfg.stations]
-    for station in (cfg.station(i) for i in ids):
-        if station.id not in names:
-            problems.append(f'Station {station.id} is not visible: give the API user View permission on it')
+    enabled = service.settings.enabled()
+    for settings in enabled:
+        if settings.id not in names:
+            problems.append(f'Station {settings.id} is not visible: give the API user View permission on it')
             continue
         try:
-            client.can_read_media(station.id)
+            service.client.can_read_media(settings.id)
         except AzuraCastError:
-            problems.append(f'Station {station.id} ({names[station.id]}): give the API user Media permission')
+            problems.append(f'Station {settings.id} ({names[settings.id]}): give the API user Media permission')
             continue
-        print(f'  station {station.id:>3}  {station.mode:<8} {names[station.id]}')
-    if not ids:
-        problems.append('No station selected; check [azuracast] stations')
-    if not os.environ.get('RUNPOD_API_KEY'):
-        problems.append('RUNPOD_API_KEY is missing in .env')
-    else:
-        try:
-            reply = subprocess.run(['runpodctl', 'pod', 'list', '--all'], capture_output=True, text=True, timeout=60)
-            if reply.returncode:
-                problems.append('Runpod rejected API access; check the API key and its permissions')
-            else:
-                print('Runpod: API key accepted')
-        except (OSError, subprocess.TimeoutExpired) as error:
-            problems.append(f'Runpod check failed: {error}')
+        print(f'  station {settings.id:>3}  {settings.mode:<8} {names[settings.id]}')
+    if not enabled:
+        print('No station enabled yet; enable stations in Sweepers > Intro Detector')
+    secrets = service.gpus.secrets
+    for account in secrets.accounts():
+        reply = service.gpus.get(account).call(['runpodctl', 'pod', 'list', '--all'], check=False)
+        if reply.returncode:
+            problems.append(f'Runpod rejected the {account} key; check the key and its permissions')
+        else:
+            print(f'Runpod: {account} key accepted')
+    if not secrets.accounts():
+        print('No Runpod key yet; add one in Sweepers > Intro Detector')
     if not os.access(cfg.runpod.ssh_key, os.R_OK):
         problems.append(f'SSH key {cfg.runpod.ssh_key} is missing or unreadable')
     for problem in problems:
@@ -315,12 +373,25 @@ def main(argv=None):
                    ).set_defaults(func=cmd_health)
     sub.add_parser('sync', help='Sync AzuraCast libraries once').set_defaults(func=cmd_sync)
     p = sub.add_parser('process', help='Process pending songs now (asks the running service if there is one)')
+    p.add_argument('--station', type=int, help='Only this station')
     p.add_argument('--force', action='store_true',
                    help='Include songs with an intro and allow replacing it (only when station mode is publish)')
     p.set_defaults(func=cmd_process)
-    sub.add_parser('status', help='Queue, runs and GPU spend').set_defaults(func=cmd_status)
-    sub.add_parser('check', help='Check configuration, AzuraCast permissions and Runpod access'
+    sub.add_parser('status', help='Stations, queue, runs and GPU spend').set_defaults(func=cmd_status)
+    sub.add_parser('check', help='Check configuration, AzuraCast permissions and Runpod keys'
                    ).set_defaults(func=cmd_check)
+    p = sub.add_parser('station', help='Show or change station settings (also those only administrators may set)')
+    p.add_argument('action', choices=('show', 'set'))
+    p.add_argument('id', type=int, nargs='?')
+    p.add_argument('values', nargs='*', metavar='NAME=VALUE', help='e.g. enabled=true mode=publish billing=shared')
+    p.set_defaults(func=cmd_station)
+    p = sub.add_parser('instance', help='Show or change instance settings')
+    p.add_argument('values', nargs='*', metavar='NAME=VALUE', help='e.g. max_price_per_hour=0.9')
+    p.set_defaults(func=cmd_instance)
+    p = sub.add_parser('key', help='Runpod API keys per paying account (set reads the key from stdin)')
+    p.add_argument('action', choices=('list', 'set', 'clear'))
+    p.add_argument('account', nargs='?', default=SHARED, help='shared (default) or station-ID')
+    p.set_defaults(func=cmd_key)
     p = sub.add_parser('ab-select', help='Choose non-English recordings plus English controls for an A/B test')
     p.add_argument('--name', required=True)
     p.add_argument('--count', type=int, default=80, help='Non-English recordings (default 80)')
@@ -371,8 +442,9 @@ def main(argv=None):
     p.add_argument('--force', action='store_true',
                    help='Allow replacing an existing intro_end (only when station mode is publish)')
     p.set_defaults(func=cmd_republish)
-    p = sub.add_parser('pod', help='Inspect or retire the GPU worker')
+    p = sub.add_parser('pod', help='Inspect or retire the GPU worker of a paying account')
     p.add_argument('action', choices=('status', 'stop', 'delete'))
+    p.add_argument('--account', default=SHARED, help='shared (default) or station-ID')
     p.add_argument('--force', action='store_true')
     p.set_defaults(func=cmd_pod)
     args = parser.parse_args(argv)

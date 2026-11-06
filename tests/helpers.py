@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from intro_detector.config import Config, Runpod, Station  # noqa: E402
 from intro_detector.db import connect  # noqa: E402
 from intro_detector.evidence import INPUTS  # noqa: E402
+from intro_detector.stations import StationSettings, Stations  # noqa: E402
 
 
 def make_config(root, *stations, **extra):
@@ -18,6 +19,32 @@ def make_config(root, *stations, **extra):
 
 def database(root):
     return connect(Path(root) / 'state.sqlite3')
+
+
+def enable(con, cfg, *stations, **settings):
+    """Enable stations in the managed settings, by default with mode and filters of their Station."""
+    store = Stations(con, cfg, lambda: 0.)
+    for station in stations or cfg.stations:
+        store.save(StationSettings(station.id, enabled=station.mode != 'off',
+                                   mode=station.mode if station.mode != 'off' else 'shadow',
+                                   min_song_seconds=station.min_song_seconds,
+                                   exclude_playlists=tuple(station.exclude_playlists),
+                                   auto_process=cfg.auto_process, **settings))
+
+
+class FakeWorkers:
+    """One fake GPU serving every paying account; blocked accounts can be scripted."""
+    blocked_accounts = {}
+
+    def get(self, account):
+        self.accounts = getattr(self, 'accounts', []) + [account]
+        return self
+
+    def blocked(self, account):
+        return self.blocked_accounts.get(account)
+
+    def idle_tick(self):
+        return None
 
 
 def report_row(song, sha256, duration=30.):

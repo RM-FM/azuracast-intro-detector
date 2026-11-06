@@ -198,8 +198,8 @@ def load(path=None, environ=None):
                      for i in selection or () if i not in listed]
     else:
         raise ValueError('azuracast.stations must be "all" or a list of station IDs')
-    if not all_stations and not stations or len({s.id for s in stations}) != len(stations):
-        raise ValueError('Configure at least one station, each only once')
+    if len({s.id for s in stations}) != len(stations):
+        raise ValueError('Configure each station only once')
     pod = dict(raw.get('runpod', {}))
     if 'gpus' in pod:
         if not isinstance(pod['gpus'], dict) or not pod['gpus']:

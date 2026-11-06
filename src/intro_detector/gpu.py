@@ -5,8 +5,10 @@ synced before every batch, so pipeline changes need no new GPU image. gpu/run-la
 several staggered lanes that pull song chunks from
 a shared queue, so CPU-only stages of one lane overlap GPU stages of another.
 """
+import dataclasses
 import datetime
 import fcntl
+import functools
 import json
 import logging
 import math
@@ -17,6 +19,8 @@ import shlex
 import subprocess
 import time
 import uuid
+
+from .stations import SHARED, account_station
 
 log = logging.getLogger(__name__)
 
@@ -51,8 +55,12 @@ class KeepPodRunning(GpuError):
     """Evidence could not be copied; the worker stays reachable for recovery."""
 
 
-def run_command(command, check=True):
-    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+class MissingKey(GpuError):
+    """The paying account has no Runpod API key."""
+
+
+def run_command(command, check=True, env=None):
+    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=env)
     if check and result.returncode:
         raise GpuError(f'{shlex.join(command)} failed ({result.returncode}): '
                        f'{result.stderr.strip() or result.stdout.strip()}')
@@ -138,12 +146,38 @@ def month_spend(rows, now):
     return total
 
 
+def account_spend(con, account, now):
+    return month_spend(con.execute('SELECT * FROM pods WHERE account=?', (account,)).fetchall(), now)
+
+
+def station_spend(con, account, station_id, now):
+    """Estimated share of the account's spend this month, split per Pod by analyzed songs."""
+    total = 0.
+    for pod in con.execute('SELECT * FROM pods WHERE account=?', (account,)).fetchall():
+        cost = month_spend([pod], now)
+        if not cost:
+            continue
+        songs = dict(con.execute('SELECT s.station_id, SUM(s.songs) FROM run_stations s JOIN runs r ON r.id = s.run_id '
+                                 'WHERE r.pod_id=? GROUP BY s.station_id', (pod['pod_id'],)).fetchall())
+        if songs.get(station_id):
+            total += cost * songs[station_id] / sum(songs.values())
+    return total
+
+
 class Runpod:
-    def __init__(self, settings, con, data_dir, call=run_command, sleep=time.sleep, clock=time.time):
-        self.cfg, self.con, self.call, self.sleep, self.clock = settings, con, call, sleep, clock
+    def __init__(self, settings, con, data_dir, call=None, sleep=time.sleep, clock=time.time,
+                 account=SHARED, api_key=None):
+        env = None if api_key is None else {**os.environ, 'RUNPOD_API_KEY': api_key}
+        self.call = call or functools.partial(run_command, env=env)
+        self.cfg, self.con, self.sleep, self.clock = settings, con, sleep, clock
+        self.account, self.api_key = account, api_key
         self.data_dir = Path(data_dir)
         self.key = Path(settings.ssh_key)
         self.last_pod_id = None
+
+    @property
+    def lock_path(self):
+        return self.data_dir / ('.gpu.lock' if self.account == SHARED else f'.gpu-{self.account}.lock')
 
     # -- runpodctl -------------------------------------------------------
     def _json(self, command):
@@ -174,16 +208,19 @@ class Runpod:
                              (*values.values(), pod_id))
 
     def spend(self):
-        return month_spend(self.con.execute('SELECT * FROM pods').fetchall(), self.clock())
+        return account_spend(self.con, self.account, self.clock())
 
     def retire(self, pod_id, delete):
         action = 'delete' if delete else 'stop'
         self.call(['runpodctl', 'pod', action, pod_id])
-        if self._row(pod_id) is None:
+        row = self._row(pod_id)
+        if row is None:
             with self.con:
-                self.con.execute('INSERT INTO pods(pod_id, price, created_at) VALUES(?,?,?)',
-                                 (pod_id, 0., self.clock()))
-        self._update(pod_id, ended_at=self.clock(), idle_since=None)
+                self.con.execute('INSERT INTO pods(pod_id, price, created_at, account) VALUES(?,?,?,?)',
+                                 (pod_id, 0., self.clock(), self.account))
+        # A stopped Pod no longer bills GPU time; deleting it later must not extend its spend.
+        ended = row['ended_at'] if row is not None and row['ended_at'] else self.clock()
+        self._update(pod_id, ended_at=ended, idle_since=None)
         log.info('%s Pod %s', 'Deleted' if delete else 'Stopped', pod_id)
 
     def ensure_worker(self, songs=1):
@@ -196,8 +233,8 @@ class Runpod:
             if pod.get('desiredStatus') == 'RUNNING':
                 if row is None:
                     with self.con:
-                        self.con.execute('INSERT INTO pods(pod_id, price, created_at) VALUES(?,?,?)',
-                                         (pod['id'], self.cfg.max_price_per_hour, self.clock()))
+                        self.con.execute('INSERT INTO pods(pod_id, price, created_at, account) VALUES(?,?,?,?)',
+                                         (pod['id'], self.cfg.max_price_per_hour, self.clock(), self.account))
                 log.info('Reusing running worker %s', pod['id'])
                 return pod['id']
             if pod.get('desiredStatus') == 'EXITED' and row is not None and row['copied']:
@@ -254,8 +291,8 @@ class Runpod:
             if not isinstance(pod_id, str) or not re.fullmatch(r'[a-z0-9]+', pod_id):
                 raise GpuError('Invalid Pod ID; check "runpodctl pod list --all"')
             with self.con:
-                self.con.execute('INSERT OR REPLACE INTO pods(pod_id, gpu_id, gpu_memory_gb, price, created_at) '
-                                 'VALUES(?,?,?,?,?)', (pod_id, gpu_id, memory, price, self.clock()))
+                self.con.execute('INSERT OR REPLACE INTO pods(pod_id, gpu_id, gpu_memory_gb, price, created_at, account) '
+                                 'VALUES(?,?,?,?,?,?)', (pod_id, gpu_id, memory, price, self.clock(), self.account))
             log.info('Created worker %s: %s in %s', pod_id, gpu_id, dc)
             return pod_id
         raise NoCapacity('No GPU location accepted a Pod within the price limit; no Pod created')
@@ -301,7 +338,7 @@ class Runpod:
     def run(self, songs_dir, output_dir):
         """Analyze every file in songs_dir; returns the local directory with pulled reports."""
         output_dir = Path(output_dir)
-        lock_path = self.data_dir / '.gpu.lock'
+        lock_path = self.lock_path
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -371,10 +408,11 @@ class Runpod:
         pod = self.worker()
         if pod is None or pod.get('desiredStatus') != 'RUNNING':
             with self.con:
-                self.con.execute('UPDATE pods SET ended_at=?, idle_since=NULL WHERE ended_at IS NULL AND pod_id!=?',
-                                 (self.clock(), pod['id'] if pod else ''))
+                self.con.execute('UPDATE pods SET ended_at=?, idle_since=NULL '
+                                 'WHERE ended_at IS NULL AND pod_id!=? AND account=?',
+                                 (self.clock(), pod['id'] if pod else '', self.account))
             return None
-        lock_path = self.data_dir / '.gpu.lock'
+        lock_path = self.lock_path
         with lock_path.open('a') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -384,8 +422,8 @@ class Runpod:
             if row is None:
                 # A worker from a previous process: start a fresh idle clock, never orphan it.
                 with self.con:
-                    self.con.execute('INSERT INTO pods(pod_id, price, created_at, idle_since) VALUES(?,?,?,?)',
-                                     (pod['id'], self.cfg.max_price_per_hour, self.clock(), self.clock()))
+                    self.con.execute('INSERT INTO pods(pod_id, price, created_at, idle_since, account) VALUES(?,?,?,?,?)',
+                                     (pod['id'], self.cfg.max_price_per_hour, self.clock(), self.clock(), self.account))
                 return 'idle'
             if row['idle_since'] is None:
                 self._update(pod['id'], idle_since=self.clock())
@@ -401,3 +439,62 @@ class Runpod:
                 log.warning('Could not check remote lock on %s: %s', pod['id'], error)
             self.retire(pod['id'], delete=bool(row['copied']))
             return 'retired'
+
+
+class Workers:
+    """One Runpod worker per paying account, each with its own key, budget and worker name."""
+
+    def __init__(self, cfg, con, stations, instance, secrets, call=None, sleep=time.sleep, clock=time.time):
+        self.cfg, self.con, self.stations, self.instance, self.secrets = cfg, con, stations, instance, secrets
+        self.call, self.sleep, self.clock = call, sleep, clock
+        self._workers, self._checked = {}, {}
+
+    def settings(self, account):
+        instance = self.instance.get()
+        if account == SHARED:
+            budget, name = instance.shared_budget_usd, self.cfg.runpod.worker_name
+        else:
+            budget = self.stations.get(account_station(account)).budget_usd
+            name = f'{self.cfg.runpod.worker_name}-{account}'
+        return dataclasses.replace(self.cfg.runpod, max_price_per_hour=instance.max_price_per_hour,
+                                   monthly_budget_usd=budget, worker_name=name)
+
+    def get(self, account):
+        key = self.secrets.get(account)
+        if key is None:
+            raise MissingKey(f'No Runpod API key for {account}')
+        worker = self._workers.get(account)
+        if worker is None or worker.api_key != key:
+            worker = self._workers[account] = Runpod(
+                self.settings(account), self.con, self.cfg.data_dir, call=self.call, sleep=self.sleep,
+                clock=self.clock, account=account, api_key=key)
+        else:
+            worker.cfg = self.settings(account)
+        return worker
+
+    def spend(self, account):
+        return account_spend(self.con, account, self.clock())
+
+    def blocked(self, account):
+        """Why the account cannot start a GPU batch now, or None."""
+        if not self.secrets.has(account):
+            return 'no Runpod key'
+        budget = self.settings(account).monthly_budget_usd
+        if budget and self.spend(account) >= budget:
+            return 'monthly budget reached'
+        return None
+
+    def open_accounts(self):
+        return {row[0] for row in self.con.execute('SELECT DISTINCT account FROM pods WHERE ended_at IS NULL')}
+
+    def idle_tick(self):
+        """Retire idle workers; accounts without an open worker are checked once per poll interval."""
+        now, open_accounts = self.clock(), self.open_accounts()
+        for account in sorted(set(self.secrets.accounts()) | open_accounts):
+            if account not in open_accounts and now - self._checked.get(account, -math.inf) < self.cfg.poll_seconds:
+                continue
+            self._checked[account] = now
+            try:
+                self.get(account).idle_tick()
+            except GpuError as error:
+                log.warning('Idle guard for %s: %s', account, error)

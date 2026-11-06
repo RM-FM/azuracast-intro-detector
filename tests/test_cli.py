@@ -69,18 +69,19 @@ class Health(unittest.TestCase):
 
 
 class ForcedUpdates(unittest.TestCase):
-    def test_process_force_is_forwarded_to_service(self):
+    def test_process_force_requests_and_processes_the_station(self):
         with tempdir() as tmp:
             data_dir = Path(tmp) / 'data'
             service = SimpleNamespace(
                 cfg=SimpleNamespace(data_dir=data_dir),
-                request_path=data_dir / '.process-request',
-                sync=Mock(),
+                settings=SimpleNamespace(get=lambda station_id: SimpleNamespace(enabled=True)),
+                sync=Mock(), request=Mock(return_value=1),
                 process=Mock(return_value='processed 0'))
             with patch('intro_detector.cli._service', return_value=service):
-                cli.main(['process', '--force'])
-            service.sync.assert_called_once_with()
-            service.process.assert_called_once_with(force=True, force_publish=True)
+                cli.main(['process', '--station', '3', '--force'])
+            service.sync.assert_called_once_with({3})
+            service.request.assert_called_once_with(3, True)
+            service.process.assert_called_once_with()
 
     def test_republish_force_is_forwarded_to_service(self):
         service = SimpleNamespace(republish=Mock(return_value=1))

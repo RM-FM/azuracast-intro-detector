@@ -18,6 +18,7 @@ import zlib
 
 from . import evidence
 from .db import pack, unpack
+from .stations import SHARED
 
 NAME = re.compile(r'[A-Za-z0-9_-]{1,64}')
 # Language that Whisper detected on the Mel-Band stem: the per-song ASR language of B.
@@ -136,9 +137,10 @@ def run(service, name, max_usd=None, log=print):
     result = dict(already=len(entries) - len(todo), stored=0, failed={}, changed_audio=[])
     if not todo:
         return result
+    gpu = service.gpus.get(SHARED)
     if max_usd is not None:
-        service.gpu.cfg = cost_limits(service.gpu.cfg, service.gpu.spend(), max_usd)
-        log(f'Cost cap {max_usd:.2f} USD: batch stops after {service.gpu.cfg.max_run_minutes} minutes')
+        gpu.cfg = cost_limits(gpu.cfg, gpu.spend(), max_usd)
+        log(f'Cost cap {max_usd:.2f} USD: batch stops after {gpu.cfg.max_run_minutes} minutes')
     batch = service.cfg.data_dir / 'work' / f'ab-{uuid.uuid4().hex}'
     songs = batch / 'songs'
     try:
@@ -154,7 +156,7 @@ def run(service, name, max_usd=None, log=print):
         if not wanted:
             return result
         log(f'Analyzing {len(wanted)} recordings on the GPU (set {name})')
-        service.gpu.run(songs, batch / 'reports')
+        gpu.run(songs, batch / 'reports')
         report, music = evidence.load_reports(batch / 'reports/report.json', batch / 'reports/music-report.json')
         complete, failed = evidence.split(report, music, wanted)
         with con:
