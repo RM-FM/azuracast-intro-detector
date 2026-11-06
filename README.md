@@ -5,11 +5,10 @@ plugin. It runs next to AzuraCast and rents Runpod GPU workers when a song needs
 analysis. No local GPU is required.
 
 Each station switches it on in **Sweepers → Intro Detector** with a Runpod API key and
-a monthly budget. Stations start in **shadow mode**: proposed intro
-values are recorded, not written to AzuraCast. Intro values entered by hand are
-never overwritten.
+a monthly budget. Intros it finds are written to AzuraCast right away; intro values
+entered by hand are never overwritten.
 
-Review proposed cues before enabling publishing; installation does not validate
+Start with one station and listen to the results; installation does not validate
 detection accuracy for your library.
 
 ## Quick Start
@@ -59,16 +58,14 @@ keeps its own monthly budget.
 
 1. Open **Sweepers → Intro Detector** for the station. Changing it needs the station's
   broadcasting permission.
-2. Switch the detector on, keep **Shadow** mode, enter the Runpod key and a monthly
-  budget, and save. New uploads are analyzed automatically from now on.
-3. To analyze songs already in the library, use **Analyze existing library**. It shows
+2. Switch the detector on, enter the Runpod key and a monthly budget, and save. New
+  uploads are analyzed automatically from now on and their intros written to AzuraCast.
+3. To analyze songs already in the library, use **Older songs → Show cost…**. It shows
   the number of songs and an estimated cost before anything is queued.
   **Processing uses paid GPU time** unless an identical file was analyzed before.
-4. Listen to results in Sweepers' Intro Manager. Shadow mode has not changed the
-  saved intro values.
-5. When satisfied, switch to **Publish** mode and choose **Write them to AzuraCast** to
-  publish the intros found so far.
-6. Validate station playback with sweepers before leaving publishing enabled.
+4. Listen to the results in Sweepers' Intro Manager and correct any intro there; a
+  corrected value counts as entered by hand and is kept.
+5. Validate station playback with sweepers before enabling more stations.
 
 
 ## Everyday use

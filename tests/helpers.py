@@ -22,11 +22,10 @@ def database(root):
 
 
 def enable(con, cfg, *stations, **settings):
-    """Enable stations in the managed settings, by default with mode and filters of their Station."""
+    """Enable stations in the managed settings with the filters of their Station; mode off disables."""
     store = Stations(con, cfg, lambda: 0.)
     for station in stations or cfg.stations:
         store.save(StationSettings(station.id, enabled=station.mode != 'off',
-                                   mode=station.mode if station.mode != 'off' else 'shadow',
                                    min_song_seconds=station.min_song_seconds,
                                    exclude_playlists=tuple(station.exclude_playlists),
                                    auto_process=cfg.auto_process, **settings))

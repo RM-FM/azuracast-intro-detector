@@ -49,8 +49,6 @@ class Api:
             ('POST', r'/api/v1/stations/(\d+)/process', self.process),
             ('POST', r'/api/v1/stations/(\d+)/retry', self.retry),
             ('POST', r'/api/v1/stations/(\d+)/backfill', self.backfill),
-            ('GET', r'/api/v1/stations/(\d+)/preview', self.preview),
-            ('POST', r'/api/v1/stations/(\d+)/publish', self.publish),
             ('POST', r'/api/v1/stations/(\d+)/worker/retire', self.retire_station_worker),
         ]
 
@@ -162,23 +160,6 @@ class Api:
                          now=service.clock())
         return dict(songs=count, estimated_usd=_estimate(service, count),
                     station=status.station(service, station_id))
-
-    def preview(self, service, data, station_id):
-        """What publishing would write: stored decisions not yet in AzuraCast."""
-        counts = dict(service.con.execute('SELECT state, COUNT(*) FROM publications WHERE station_id=? '
-                                          'GROUP BY state', (station_id,)).fetchall())
-        rows = [dict(r) for r in service.con.execute(
-            "SELECT p.media_id, m.path, p.value, m.intro_end AS current FROM publications p "
-            "JOIN media m ON m.station_id = p.station_id AND m.media_id = p.media_id "
-            "WHERE p.station_id=? AND p.state='planned' ORDER BY m.path LIMIT 100", (station_id,))]
-        return dict(counts=counts, planned=rows)
-
-    def publish(self, service, data, station_id):
-        settings = self._enabled(service, station_id)
-        if settings.mode != 'publish':
-            raise ApiError(409, 'Switch the station to publish mode first')
-        service.queue_job(station_id, 'republish')
-        return status.station(service, station_id)
 
     def retire_station_worker(self, service, data, station_id):
         """Stop or delete the worker of the station's Runpod key; deleting unconfirmed evidence needs force."""

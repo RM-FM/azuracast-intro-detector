@@ -9,10 +9,9 @@ import tempfile
 
 from .config import Station
 
-STATION_MODES = ('shadow', 'publish')
 MAX_USD = 100000.
-# Version of the stored settings model; version 1 had a server-wide shared Runpod key.
-SETTINGS_VERSION = 2
+# Version of the stored settings model; version 1 had a shared Runpod key, version 2 a shadow mode.
+SETTINGS_VERSION = 3
 
 
 def key_slot(station_id):
@@ -98,8 +97,8 @@ class Secrets:
 @dataclass(frozen=True)
 class StationSettings:
     id: int
+    # An enabled station writes its intros to AzuraCast.
     enabled: bool = False
-    mode: str = 'shadow'
     # False: new songs wait for "Process now".
     auto_process: bool = True
     min_song_seconds: float = 60.0
@@ -111,7 +110,7 @@ class StationSettings:
 
     @property
     def station(self):
-        return Station(self.id, self.mode if self.enabled else 'off', self.exclude_playlists, self.min_song_seconds,
+        return Station(self.id, 'publish' if self.enabled else 'off', self.exclude_playlists, self.min_song_seconds,
                        self.max_song_seconds)
 
     def public(self):
@@ -129,8 +128,7 @@ def _validated(settings, changes):
     for name in ('enabled', 'auto_process'):
         if name in values:
             _bool(name, values[name])
-    if 'mode' in values and values['mode'] not in STATION_MODES:
-        raise ValueError(f'mode must be one of {STATION_MODES}')
+
     if 'min_song_seconds' in values:
         values['min_song_seconds'] = _number('min_song_seconds', values['min_song_seconds'], 0, 3600)
     if 'max_song_seconds' in values:
@@ -151,8 +149,7 @@ class Stations:
 
     def defaults(self, station_id):
         base = self.cfg.station_defaults
-        return StationSettings(int(station_id), mode=base.mode if base.mode in STATION_MODES else 'shadow',
-                               auto_process=self.cfg.auto_process, min_song_seconds=float(base.min_song_seconds),
+        return StationSettings(int(station_id), auto_process=self.cfg.auto_process, min_song_seconds=float(base.min_song_seconds),
                                exclude_playlists=tuple(base.exclude_playlists),
                                budget_usd=float(self.cfg.runpod.monthly_budget_usd))
 
@@ -236,7 +233,6 @@ def _from_legacy_install(con, cfg, stations, instance, secrets, environ):
     for station_id in sorted(ids):
         legacy = cfg.station(station_id)
         stations.save(replace(stations.defaults(station_id), enabled=legacy.mode != 'off',
-                              mode=legacy.mode if legacy.mode in STATION_MODES else 'shadow',
                               min_song_seconds=float(legacy.min_song_seconds),
                               exclude_playlists=tuple(legacy.exclude_playlists)))
         if key:
@@ -273,7 +269,16 @@ def migrate(con, cfg, stations, instance, secrets, environ):
     if version == 0:
         migrated = _from_legacy_install(con, cfg, stations, instance, secrets, environ)
     else:
-        _from_shared_key(con, cfg, instance, secrets)
+        if version == 1:
+            _from_shared_key(con, cfg, instance, secrets)
         migrated = True
+    _publish_proposals(con, stations)
     instance.set_marker('migrated', SETTINGS_VERSION)
     return migrated
+
+
+def _publish_proposals(con, stations):
+    """Intros proposed while a station only recorded them are written once it is enabled."""
+    with con:
+        con.executemany("INSERT OR REPLACE INTO station_jobs(station_id, kind, requested_at) VALUES(?, 'publish', 0)",
+                        [(s.id,) for s in stations.enabled()])

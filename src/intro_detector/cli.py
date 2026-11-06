@@ -126,7 +126,7 @@ def cmd_status(args):
     now = time.time()
     for s in service.settings.all():
         state = 'enabled' if s.enabled else 'disabled'
-        print(f'station {s.id:>3}  {state:<8} {s.mode:<7} {"auto" if s.auto_process else "manual":<6} '
+        print(f'station {s.id:>3}  {state:<8} {"auto" if s.auto_process else "manual":<6} '
               f'GPU {service.gpus.account(s.id) or "no key"}, {station_spend(con, s.id, now):.2f} of '
               f'{s.budget_usd or "unlimited"} USD this month' + (' (process requested)' if s.id in requests else '')
               + (f'  blocked: {service.blocked(s)}' if s.enabled and service.blocked(s) else ''))
@@ -341,7 +341,7 @@ def cmd_check(args):
         except AzuraCastError:
             warnings.append(f'Station {settings.id} ({names[settings.id]}): the API user needs Media permission')
             continue
-        print(f'  station {settings.id:>3}  {settings.mode:<8} {names[settings.id]}')
+        print(f'  station {settings.id:>3}  {names[settings.id]}')
     if not enabled:
         print('No station enabled yet; enable stations in Sweepers > Intro Detector')
     for account in sorted(service.gpus.accounts()):
@@ -375,7 +375,7 @@ def main(argv=None):
     p = sub.add_parser('process', help='Process pending songs now (asks the running service if there is one)')
     p.add_argument('--station', type=int, help='Only this station')
     p.add_argument('--force', action='store_true',
-                   help='Include songs with an intro and allow replacing it (only when station mode is publish)')
+                   help='Include songs with an intro and allow replacing it')
     p.set_defaults(func=cmd_process)
     sub.add_parser('status', help='Stations, queue, runs and GPU spend').set_defaults(func=cmd_status)
     sub.add_parser('check', help='Check configuration, AzuraCast permissions and Runpod keys'
@@ -383,7 +383,7 @@ def main(argv=None):
     p = sub.add_parser('station', help='Show or change station settings')
     p.add_argument('action', choices=('show', 'set'))
     p.add_argument('id', type=int, nargs='?')
-    p.add_argument('values', nargs='*', metavar='NAME=VALUE', help='e.g. enabled=true mode=publish budget_usd=20')
+    p.add_argument('values', nargs='*', metavar='NAME=VALUE', help='e.g. enabled=true budget_usd=20')
     p.set_defaults(func=cmd_station)
     p = sub.add_parser('key', help='Runpod API key of a station (set reads the key from stdin)')
     p.add_argument('action', choices=('list', 'set', 'clear'))
@@ -433,11 +433,11 @@ def main(argv=None):
     p.add_argument('--station', type=int, required=True)
     p.add_argument('--media', type=int, required=True)
     p.set_defaults(func=cmd_unlock)
-    p = sub.add_parser('republish', help='Re-decide and publish analyzed songs (e.g. after shadow -> publish)')
+    p = sub.add_parser('republish', help='Re-decide and publish analyzed songs (e.g. after changing decision settings)')
     p.add_argument('--station', type=int, required=True)
     p.add_argument('--media', type=int)
     p.add_argument('--force', action='store_true',
-                   help='Allow replacing an existing intro_end (only when station mode is publish)')
+                   help='Allow replacing an existing intro_end')
     p.set_defaults(func=cmd_republish)
     p = sub.add_parser('pod', help="Inspect or retire the GPU worker of a station's Runpod key")
     p.add_argument('action', choices=('status', 'stop', 'delete'))

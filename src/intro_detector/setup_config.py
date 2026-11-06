@@ -62,7 +62,6 @@ def prepare(root, url, azura_key, runpod_key=''):
     document = tomlkit.parse((config_path if config_path.exists() else root / 'config.example.toml').read_text())
     document.setdefault('azuracast', tomlkit.table())['base_url'] = url.rstrip('/')
     if not config_path.exists():
-        document.setdefault('station_defaults', tomlkit.table())['mode'] = 'shadow'
         document.setdefault('scan', tomlkit.table())['auto_process'] = True
     with tempfile.TemporaryDirectory(prefix='.setup-', dir=root) as directory:
         temporary = Path(directory)

@@ -25,18 +25,17 @@ class StationSettingsStore(unittest.TestCase):
 
     def test_unknown_stations_use_disabled_defaults(self):
         settings = self.store.get(4)
-        self.assertEqual((settings.enabled, settings.mode, settings.min_song_seconds, settings.exclude_playlists,
-                          settings.budget_usd), (False, 'publish', 90., (7,), 15.))
+        self.assertEqual((settings.enabled, settings.min_song_seconds, settings.exclude_playlists,
+                          settings.budget_usd), (False, 90., (7,), 15.))
         self.assertEqual(settings.station.mode, 'off')
         self.assertEqual(self.store.all(), [])
 
     def test_station_settings_are_validated(self):
-        settings = self.store.update(3, {'enabled': True, 'mode': 'shadow', 'exclude_playlists': [9, 2, 9],
-                                         'budget_usd': 12})
+        settings = self.store.update(3, {'enabled': True, 'exclude_playlists': [9, 2, 9], 'budget_usd': 12})
         self.assertEqual((settings.station.mode, settings.exclude_playlists, settings.budget_usd),
-                         ('shadow', (2, 9), 12.))
+                         ('publish', (2, 9), 12.))
         self.assertEqual(self.store.get(3), settings)
-        for bad in ({'mode': 'off'}, {'enabled': 1}, {'budget_usd': -1}, {'exclude_playlists': ['x']},
+        for bad in ({'mode': 'shadow'}, {'enabled': 1}, {'budget_usd': -1}, {'exclude_playlists': ['x']},
                     {'min_song_seconds': float('nan')}, {'billing': 'shared'}, {'max_song_seconds': 30},
                     {'max_song_seconds': -1}):
             with self.assertRaises(ValueError):
@@ -95,9 +94,10 @@ class Migration(unittest.TestCase):
                           station_defaults=Station(0, 'shadow'), auto_process=False)
         migrated, (stations, instance, secrets) = self.run_migration(cfg, {'RUNPOD_API_KEY': KEY})
         self.assertTrue(migrated)
-        summary = [(s.id, s.enabled, s.mode, s.auto_process, s.exclude_playlists) for s in stations.all()]
-        self.assertEqual(summary, [(1, True, 'shadow', False, ()), (2, False, 'shadow', False, ()),
-                                   (5, True, 'publish', False, (3,))])
+        summary = [(s.id, s.enabled, s.auto_process, s.exclude_playlists) for s in stations.all()]
+        self.assertEqual(summary, [(1, True, False, ()), (2, False, False, ()), (5, True, False, (3,))])
+        self.assertEqual([tuple(r) for r in self.con.execute("SELECT station_id FROM station_jobs WHERE kind='publish'")],
+                         [(1,), (5,)], 'Intros recorded in shadow mode are written')
         self.assertEqual(secrets.slots(), ['station-1', 'station-2', 'station-5'])
         self.assertEqual(secrets.keys(), [KEY])
         self.assertEqual(instance.marker('worker_names'), {key_account(KEY): 'azuracast-intro-detector'})
@@ -109,7 +109,7 @@ class Migration(unittest.TestCase):
         migrated, (stations, instance, secrets) = self.run_migration(cfg, {'RUNPOD_API_KEY': KEY})
         self.assertFalse(migrated)
         self.assertEqual((stations.all(), secrets.slots()), ([], []))
-        self.assertEqual(instance.marker('migrated'), 2)
+        self.assertEqual(instance.marker('migrated'), 3)
 
     def test_stations_on_the_shared_key_get_it_as_their_own(self):
         cfg = make_config(self.tmp.name)
@@ -148,8 +148,18 @@ class Migration(unittest.TestCase):
         self.assertIsNone(self.con.execute("SELECT name FROM sqlite_master WHERE name='analysis_accounts'").fetchone())
         self.assertEqual(stations.get(1).budget_usd, 10.)
         self.assertEqual(json.loads(self.con.execute("SELECT value FROM instance_settings WHERE key='_migrated'")
-                                    .fetchone()[0]), 2)
+                                    .fetchone()[0]), 3)
         self.assertFalse(self.run_migration(cfg, {})[0])
+
+    def test_stations_that_only_recorded_intros_publish_them(self):
+        cfg = make_config(self.tmp.name)
+        stations = Stations(self.con, cfg, lambda: 1.)
+        stations.update(1, {'enabled': True})
+        stations.update(2, {'enabled': False})
+        Instance(self.con).set_marker('migrated', 2)
+        migrated, _ = self.run_migration(cfg, {})
+        self.assertTrue(migrated)
+        self.assertEqual([tuple(r) for r in self.con.execute('SELECT station_id, kind FROM station_jobs')], [(1, 'publish')])
 
 
 if __name__ == '__main__':

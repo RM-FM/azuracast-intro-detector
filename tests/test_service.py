@@ -52,7 +52,7 @@ class StationSelection(unittest.TestCase):
             cfg = make_config(tmp)
             enable(con, cfg, Station(1, 'publish'), Station(2, 'off'), Station(3, 'shadow'))
             service = Service(cfg, con, client, FakeGpu(), clock=Clock())
-            self.assertEqual([(s.id, s.mode) for s in service.stations()], [(1, 'publish'), (3, 'shadow')])
+            self.assertEqual([(s.id, s.mode) for s in service.stations()], [(1, 'publish'), (3, 'publish')])
             self.assertEqual(service.station(2).mode, 'off')
             self.assertEqual(service.station(9).mode, 'off')
             service.sync()
@@ -139,6 +139,20 @@ class Processing(QueueCase):
         self.assertEqual(self.client.writes, [(1, 2, 5.)])
         self.assertEqual(service.republish(1, 2, force=True), 1)
         self.assertEqual(self.client.writes, [(1, 2, 5.), (1, 2, 5.)])
+
+    def test_intros_recorded_by_shadow_mode_are_published_once(self):
+        service = self.service(FakeGpu(), {sha(2): 5., sha(3): 6.})
+        self.upload(2, 3)
+        self.clock.now += 61
+        service.process()
+        writes = list(self.client.writes)
+        with self.con:
+            self.con.execute("UPDATE publications SET state='planned' WHERE media_id=3")
+            self.client.files[3]['custom_fields']['intro_end'] = ''
+        service.queue_job(1, 'publish')
+        service.run_jobs()
+        self.assertEqual(self.client.writes, writes + [(1, 3, 6.)], 'Only the recorded intro is written')
+        self.assertEqual(self.con.execute('SELECT state FROM publications WHERE media_id=3').fetchone()[0], 'written')
 
     def test_known_audio_skips_gpu(self):
         gpu = FakeGpu()

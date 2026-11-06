@@ -16,8 +16,6 @@ timeout_seconds = 60
 
 # Defaults for a station when it is first enabled on the Intro Detector page.
 [station_defaults]
-# shadow (decide and record, never write) | publish
-mode = "shadow"
 # Shorter files (station IDs, sweepers, unknown length) are not analyzed.
 min_song_seconds = 60
 # Songs in Jingle Mode playlists are always skipped; list further non-song playlist IDs here.

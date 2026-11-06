@@ -102,7 +102,7 @@ Worker-image changes are separate from service updates and do not require
 reanalyzing unchanged audio automatically.
 
 The first start of 1.0 moves an existing configuration into the station settings:
-stations selected in `config.toml` stay enabled with their mode and filters and each
+stations selected in `config.toml` stay enabled with their filters and each
 gets the Runpod key from `.env`. Later changes to station sections in `config.toml`
 have no effect.
 
@@ -124,7 +124,6 @@ or with `intro-detector station set`. Settings per station:
 | Setting | Default for a new station | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | Sync, analyze and decide for this station |
-| `mode` | `[station_defaults] mode` | `shadow` (propose only) or `publish` |
 | `auto_process` | `[scan] auto_process` | Analyze new uploads without "Process now" |
 | `min_song_seconds` | `[station_defaults]`, `60` | Skip shorter files and files of unknown length |
 | `max_song_seconds` | `900` | Skip longer files, such as DJ mixes; `0` means no maximum |
@@ -178,11 +177,11 @@ not this configuration. Changing them can require fresh analyses.
 
 ## Publishing and automatic processing
 
-Start with one station. Switch it to **Publish** on the Intro Detector page; intros found
-in shadow mode are written with **Write them to AzuraCast**. From the command line:
+An enabled station writes every intro the detector finds to AzuraCast at once; values
+entered by hand are kept. Start with one station. After changing decision settings,
+check and apply their effect on stored analyses from the command line:
 
 ```bash
-docker compose exec detector intro-detector station set 1 mode=publish
 docker compose exec detector intro-detector decision-diff --station 1
 docker compose exec detector intro-detector republish --station 1
 ```
@@ -191,8 +190,10 @@ The dry-run report lists proposed changes. Republishing uses stored analyses and
 not create a GPU worker. Check results before applying them.
 
 Switch off **Analyze new uploads automatically** when uploads should wait for "Process
-now". This is independent of the publishing mode: shadow-mode analysis still costs
-money when it needs a GPU.
+now".
+
+Earlier releases had a shadow mode that only recorded intros. Updating writes the intros
+recorded that way once for every enabled station.
 
 ## Runpod keys and the management API
 
@@ -310,7 +311,7 @@ detector should manage that value again.
 docker compose exec detector intro-detector check
 docker compose exec detector intro-detector status
 docker compose exec detector intro-detector station show
-docker compose exec detector intro-detector station set 1 enabled=true mode=shadow budget_usd=20
+docker compose exec detector intro-detector station set 1 enabled=true budget_usd=20
 docker compose exec -T detector intro-detector key set 1 < runpod-key.txt
 docker compose exec detector intro-detector backfill --station 1 --dry-run
 docker compose exec detector intro-detector backfill --station 1 --limit 100
@@ -324,8 +325,8 @@ Stations enabled from the command line also need AzuraCast access: run
 `azuracast_cli sweepers:detector-account --sync` in AzuraCast's `web` container.
 `backfill --include-set` also considers already tagged files; use deliberately. Pair it
 with `process --force` only when intentionally replacing existing cues. For completed
-analyses, `republish --force` uses stored evidence and permits replacement only in
-`publish` mode; it does not rescan audio. `retry` requeues failures. `process` may create
+analyses, `republish --force` uses stored evidence to replace existing values; it does not
+rescan audio. `retry` requeues failures. `process` may create
 a paid GPU worker. Status and decisions are service data, not proof that station playback
 has been validated.
 

@@ -50,9 +50,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.api.handle('PUT', '/api/v1/stations/1', f'Bearer {TOKEN}', b'[1]')[0], 400)
 
     def test_station_managers_enable_and_configure_their_station(self):
-        code, body = self.call('PUT', '/api/v1/stations/3', {'enabled': True, 'mode': 'publish', 'budget_usd': 5})
+        code, body = self.call('PUT', '/api/v1/stations/3', {'enabled': True, 'budget_usd': 5})
         self.assertEqual(code, 200)
-        self.assertEqual((body['settings']['enabled'], body['settings']['mode'], body['limit_usd']), (True, 'publish', 5.))
+        self.assertEqual((body['settings']['enabled'], body['limit_usd']), (True, 5.))
+        self.assertNotIn('mode', body['settings'])
+        self.assertEqual(self.call('PUT', '/api/v1/stations/3', {'mode': 'shadow'})[0], 400)
         self.assertEqual(body['jobs'], ['sync'])
         self.assertEqual(self.call('GET', '/api/v1/stations')[1], {'stations': [{'id': 3, 'enabled': True}]})
         self.assertEqual(body['blocked'], 'no Runpod key')
@@ -99,14 +101,12 @@ class ApiTests(unittest.TestCase):
         con.close()
         self.assertIsNone(self.call('DELETE', '/api/v1/stations/4/key')[1]['key'])
 
-    def test_process_publish_and_backfill_need_an_enabled_station(self):
-        for path in ('process', 'publish', 'backfill'):
+    def test_process_and_backfill_need_an_enabled_station(self):
+        for path in ('process', 'backfill'):
             self.assertEqual(self.call('POST', f'/api/v1/stations/1/{path}')[0], 409)
+        self.assertEqual(self.call('POST', '/api/v1/stations/1/publish')[0], 404)
         self.call('PUT', '/api/v1/stations/1', {'enabled': True})
         self.assertTrue(self.call('POST', '/api/v1/stations/1/process', {'force': True})[1]['process_requested'])
-        self.assertEqual(self.call('POST', '/api/v1/stations/1/publish')[0], 409)
-        self.call('PUT', '/api/v1/stations/1', {'mode': 'publish'})
-        self.assertIn('republish', self.call('POST', '/api/v1/stations/1/publish')[1]['jobs'])
         con = database(self.tmp.name)
         sync_station(con, self.client, self.open().settings.get(1).station, now=self.clock())
         con.close()

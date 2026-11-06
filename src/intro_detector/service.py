@@ -17,7 +17,8 @@ from .stations import Instance, Stations
 log = logging.getLogger(__name__)
 TRANSIENT = (NoCapacity, BudgetExceeded, PodBusy, KeepPodRunning, MissingKey, WorkerNeedsRecovery, BlockingIOError)
 RETRY_SECONDS = 900
-JOBS = ('sync', 'republish')
+# publish: write intros recorded as planned by an earlier shadow mode.
+JOBS = ('sync', 'republish', 'publish')
 ACTIVITY = 'activity'
 
 
@@ -96,6 +97,14 @@ class Service:
             self.finalize(m, m['sha256'], force_publish=force)
             for m in self.con.execute(query, args).fetchall())
 
+    def publish_planned(self, station_id):
+        """Write the intros that were only recorded while the station did not publish."""
+        rows = self.con.execute(
+            "SELECT m.* FROM media m JOIN publications p ON p.station_id = m.station_id AND p.media_id = m.media_id "
+            "WHERE m.station_id=? AND p.state='planned' AND m.status='done' AND m.sha256 IS NOT NULL",
+            (station_id,)).fetchall()
+        return sum(self.finalize(m, m['sha256']) for m in rows)
+
     def _failed(self, media, error):
         attempts = media['attempts'] + 1
         status = 'failed' if attempts >= self.cfg.max_attempts else 'pending'
@@ -166,6 +175,8 @@ class Service:
             try:
                 if kind == 'sync':
                     self.sync({station_id})
+                elif kind == 'publish':
+                    log.info('Station %s: published %d recorded intros', station_id, self.publish_planned(station_id))
                 else:
                     log.info('Station %s: re-published %d media', station_id, self.republish(station_id))
             except Exception:

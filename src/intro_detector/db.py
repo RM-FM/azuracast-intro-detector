@@ -95,7 +95,6 @@ CREATE TABLE IF NOT EXISTS pods(
 CREATE TABLE IF NOT EXISTS station_settings(
   station_id INTEGER PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 0,
-  mode TEXT NOT NULL DEFAULT 'shadow',
   min_song_seconds REAL NOT NULL,
   max_song_seconds REAL NOT NULL DEFAULT 900,
   exclude_playlists TEXT NOT NULL DEFAULT '[]',
