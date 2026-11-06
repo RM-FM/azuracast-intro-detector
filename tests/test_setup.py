@@ -340,6 +340,7 @@ class UpdateScript(unittest.TestCase):
 
     def test_unknown_release_and_unchanged_installation(self):
         self.assertIn('was not found', self.update('v9.9.9').stderr)
+        self.assertIn('was not found', self.update('v1.0.0-rc.1').stderr)
         self.assertEqual(self.head(), 'v0.1.0')
         self.update()
         (self.azuracast / 'plugins/azuracast-sweepers/.detector.json').write_text('{}')

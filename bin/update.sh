@@ -15,7 +15,7 @@ while (($#)); do
         *) fail "$usage" ;;
     esac
 done
-[[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n "$azuracast_dir" ]] || fail "$usage"
+[[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ && -n "$azuracast_dir" ]] || fail "$usage"
 [[ "$EUID" == 0 ]] || fail 'Run this script with sudo, or from a root shell.'
 cd "$root"
 [[ -z $(git status --porcelain --untracked-files=no) ]] || \
