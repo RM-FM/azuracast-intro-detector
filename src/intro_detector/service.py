@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 TRANSIENT = (NoCapacity, BudgetExceeded, PodBusy, KeepPodRunning, MissingKey, WorkerNeedsRecovery, BlockingIOError)
 RETRY_SECONDS = 900
 JOBS = ('sync', 'republish')
+ACTIVITY = 'activity'
 
 
 class Service:
@@ -125,6 +126,25 @@ class Service:
 
     def requests(self):
         return {r['station_id']: bool(r['force']) for r in self.con.execute('SELECT * FROM process_requests')}
+
+    def activity(self):
+        """The running batch: step, counts, start times and songs per station (keys are station IDs as text)."""
+        return self.instance.marker(ACTIVITY)
+
+    def _begin_activity(self, account, rows):
+        now = self.clock()
+        self.instance.set_marker(ACTIVITY, dict(
+            account=account, step='download', done=0, total=len(rows), started_at=now, step_started_at=now,
+            songs=len(rows), stations={str(k): v for k, v in Counter(r['station_id'] for r in rows).items()}))
+
+    def _progress(self, step, done=0, total=0, **values):
+        current = self.activity()
+        if current is None:
+            return
+        if current.get('step') != step:
+            current['step_started_at'] = self.clock()
+        current.update(values, step=step, done=done, total=total)
+        self.instance.set_marker(ACTIVITY, current)
 
     def queue_job(self, station_id, kind):
         """Sync or republish a station from the service loop instead of the caller."""
@@ -240,8 +260,9 @@ class Service:
         batch = self.cfg.data_dir / 'work' / uuid.uuid4().hex
         songs = batch / 'songs'
         waiting = {}
+        self._begin_activity(account, rows)
         try:
-            for media in rows:
+            for index, media in enumerate(rows, 1):
                 publish_forced = force_publish or media['station_id'] in forced
                 suffix = PurePosixPath(media['path']).suffix.lower()
                 try:
@@ -249,6 +270,8 @@ class Service:
                 except AzuraCastError as error:
                     self._failed(media, error)
                     continue
+                finally:
+                    self._progress('download', index, len(rows))
                 with self.con:
                     self.con.execute('UPDATE media SET sha256=?, updated_at=? WHERE station_id=? AND media_id=?',
                                      (sha256, self.clock(), media['station_id'], media['media_id']))
@@ -264,6 +287,7 @@ class Service:
                 self._analyze(account, waiting, songs, batch / 'reports')
             return f'processed {len(rows)}'
         finally:
+            self.instance.set_marker(ACTIVITY, None)
             shutil.rmtree(batch, ignore_errors=True)
 
     def _finish(self, media, sha256, force_publish=False):
@@ -286,16 +310,19 @@ class Service:
     def _analyze(self, account, waiting, songs, reports):
         run_id = reports.parent.name
         self._record_run(run_id, account, waiting)
+        per_station = Counter(media['station_id'] for items in waiting.values() for media, _ in items)
+        self._progress('worker', songs=sum(per_station.values()),
+                       stations={str(k): v for k, v in per_station.items()})
         worker = None
         try:
             worker = self.gpus.get(account)
-            worker.run(songs, reports)
+            worker.run(songs, reports, self._progress)
             report, music = evidence.load_reports(reports / 'report.json', reports / 'music-report.json')
         except (GpuError, OSError, ValueError, BlockingIOError) as error:
             with self.con:
-                self.con.execute('UPDATE runs SET status=?, error=?, finished_at=?, pod_id=? WHERE id=?',
+                self.con.execute('UPDATE runs SET status=?, error=?, finished_at=?, pod_id=?, phase=? WHERE id=?',
                                  ('failed', str(error)[:2000], self.clock(),
-                                  getattr(worker, 'last_pod_id', None), run_id))
+                                  getattr(worker, 'last_pod_id', None), (self.activity() or {}).get('step'), run_id))
             log.error('GPU batch %s (%s) failed: %s', run_id, account, error)
             self.retry_at[account] = self.clock() + RETRY_SECONDS
             if isinstance(error, WorkerNeedsRecovery):
@@ -319,12 +346,16 @@ class Service:
                              ('complete' if not failed else 'partial', self.clock(),
                               json.dumps(failed)[:2000] if failed else None,
                               getattr(worker, 'last_pod_id', None), run_id))
+        saved, total = 0, sum(len(items) for items in waiting.values())
+        self._progress('save', 0, total)
         for sha256, items in waiting.items():
             for media, publish_forced in items:
                 if sha256 in complete:
                     self._finish(media, sha256, publish_forced)
                 else:
                     self._failed(media, 'incomplete evidence: ' + '; '.join(failed[sha256])[:1500])
+                saved += 1
+                self._progress('save', saved, total)
 
     def tick(self):
         """One queue step; a station's request ends once none of its songs can make progress."""
@@ -340,6 +371,10 @@ class Service:
 
     def run_forever(self, tick=15):
         last_sync = 0.
+        # A batch interrupted by a restart left its progress behind.
+        self.instance.set_marker(ACTIVITY, None)
+        with self.con:
+            self.con.execute("UPDATE runs SET status='interrupted', finished_at=? WHERE status='running'", (self.clock(),))
         while True:
             if self.clock() - last_sync >= self.cfg.poll_seconds:
                 self.sync()

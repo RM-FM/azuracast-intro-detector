@@ -128,7 +128,8 @@ CREATE TABLE IF NOT EXISTS station_jobs(
 '''
 # Columns added after the first release; existing rows belong to the shared account.
 COLUMNS = (('pods', 'account', "TEXT NOT NULL DEFAULT 'shared'"),
-           ('runs', 'account', "TEXT NOT NULL DEFAULT 'shared'"))
+           ('runs', 'account', "TEXT NOT NULL DEFAULT 'shared'"),
+           ('runs', 'phase', 'TEXT'))
 
 
 def connect(path):

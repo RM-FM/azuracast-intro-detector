@@ -6,6 +6,7 @@ from helpers import (Clock, FakeClient, FakeWorkers, database, enable, make_conf
 from intro_detector.config import Station
 from intro_detector.gpu import GpuError, NoCapacity, WorkerNeedsRecovery
 from intro_detector.library import sync_station
+from intro_detector import status
 from intro_detector.service import Service
 from intro_detector.stations import SHARED, station_account
 
@@ -24,10 +25,15 @@ class FakeGpu(FakeWorkers):
     def __init__(self, drop=(), error=None, blocked=None):
         self.drop, self.error, self.batches = set(drop), error, []
         self.blocked_accounts = dict(blocked or {})
+        self.during = None
 
-    def run(self, songs, output):
+    def run(self, songs, output, progress=None):
         files = sorted(p.name for p in songs.iterdir())
         self.batches.append(files)
+        if progress:
+            progress('worker')
+            progress('analyze', 1, 2)
+            self.during = self.observe() if hasattr(self, 'observe') else None
         if self.error:
             raise self.error
         shas = [name.split('.')[0] for name in files if name.split('.')[0] not in self.drop]
@@ -293,6 +299,36 @@ class Accounts(QueueCase):
         self.assertEqual(service.blocked(service.settings.get(1)), 'station limit on the instance key reached')
         self.assertIsNone(service.blocked(service.settings.get(2)))
 
+
+class Progress(QueueCase):
+    def setUp(self):
+        self.tmp = tempdir()
+        self.con = database(self.tmp.name)
+        self.clock = Clock()
+        self.client = FakeClient([media(1)])
+        self.configure(Station(1, 'publish'), Station(2, 'publish'), batch_quiet_seconds=0)
+
+    def test_running_batch_reports_its_step_to_its_own_stations_only(self):
+        gpu = FakeGpu()
+        service = self.service(gpu, {sha(5): 3.})
+        gpu.observe = lambda: (status.activity(service, 1), status.activity(service, 2))
+        self.upload(5)
+        service.process()
+        own, other = gpu.during
+        self.assertEqual((own['own'], own['step'], own['done'], own['total'], own['station_songs']),
+                         (True, 'analyze', 1, 2, 1))
+        self.assertEqual(other, {'step': 'analyze', 'done': 1, 'total': 2, 'started_at': self.clock(),
+                                 'step_started_at': self.clock(), 'own': False})
+        self.assertIsNone(service.activity(), 'Progress ends with the batch')
+        self.assertIsNone(status.activity(service, 1))
+
+    def test_failed_batch_keeps_the_step_it_stopped_at(self):
+        service = self.service(FakeGpu(error=GpuError('lost')), {})
+        self.upload(5)
+        service.process()
+        run = self.con.execute('SELECT status, phase FROM runs').fetchone()
+        self.assertEqual(tuple(run), ('failed', 'analyze'))
+        self.assertIsNone(service.activity())
 
 if __name__ == '__main__':
     unittest.main()

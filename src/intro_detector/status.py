@@ -39,6 +39,18 @@ def worker(con, account):
     return dict(row) if row else None
 
 
+def activity(service, station_id):
+    """The running batch as this station may see it; another station's batch shows only its progress."""
+    current = service.activity()
+    if not current:
+        return None
+    view = {key: current.get(key) for key in ('step', 'done', 'total', 'started_at', 'step_started_at')}
+    songs = (current.get('stations') or {}).get(str(station_id))
+    if songs:
+        return dict(view, own=True, songs=current.get('songs'), station_songs=songs)
+    return dict(view, own=False)
+
+
 def station(service, station_id):
     con, now = service.con, service.clock()
     settings = service.settings.get(station_id)
@@ -48,7 +60,7 @@ def station(service, station_id):
     else:
         spend, limit = account_spend(con, account, now), settings.budget_usd
     runs = [dict(r) for r in con.execute(
-        'SELECT r.id, r.status, s.songs, r.started_at, r.finished_at, SUBSTR(r.error, 1, 300) AS error '
+        'SELECT r.id, r.status, s.songs, r.started_at, r.finished_at, r.phase, SUBSTR(r.error, 1, 300) AS error '
         'FROM runs r JOIN run_stations s ON s.run_id = r.id WHERE s.station_id=? '
         'ORDER BY r.started_at DESC LIMIT ?', (station_id, RECENT_RUNS))]
     failures = [dict(r) for r in con.execute(
@@ -70,6 +82,8 @@ def station(service, station_id):
         limit_usd=limit,
         worker=worker(con, account),
         recovery=service.recovery(account),
+        activity=activity(service, station_id),
+        now=now,
         runs=runs,
         failures=failures)
 

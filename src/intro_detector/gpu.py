@@ -339,22 +339,27 @@ class Runpod:
                          check=False).returncode != 0
 
     # -- batch -----------------------------------------------------------
-    def run(self, songs_dir, output_dir):
-        """Analyze every file in songs_dir; returns the local directory with pulled reports."""
+    def run(self, songs_dir, output_dir, progress=None):
+        """Analyze every file in songs_dir; returns the local directory with pulled reports.
+
+        progress(step, done, total) is called when the batch reaches a new step or analyzes more chunks.
+        """
+        progress = progress or (lambda step, done=0, total=0: None)
         output_dir = Path(output_dir)
         lock_path = self.lock_path
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             songs = sum(1 for p in Path(songs_dir).iterdir() if p.is_file())
+            progress('worker')
             pod_id = self.last_pod_id = self.ensure_worker(songs)
             self._update(pod_id, idle_since=None, copied=0)
             try:
-                return self._run(pod_id, Path(songs_dir), output_dir)
+                return self._run(pod_id, Path(songs_dir), output_dir, progress)
             finally:
                 self._update(pod_id, idle_since=self.clock())
 
-    def _run(self, pod_id, songs_dir, output_dir):
+    def _run(self, pod_id, songs_dir, output_dir, progress):
         host, port = self.endpoint(pod_id)
         self._ssh(pod_id, host, port, 'nvidia-smi -L && test -d /workspace')
         if self.remote_busy(pod_id, host, port):
@@ -363,6 +368,7 @@ class Runpod:
         row = self._row(pod_id)
         lanes, chunk = lane_plan(self.cfg, songs, row['gpu_memory_gb'] if row else None)
         destination = f'root@{host}:'
+        progress('upload')
         self._ssh(pod_id, host, port, f'mkdir -p {POD_DIR} {QUEUE} {EVIDENCE}/qwen')
         self._rsync(pod_id, port, '--exclude=__pycache__', str(POD_SOURCE / 'tools'), str(POD_SOURCE / 'experiments'),
                     str(LANES_SOURCE / 'run-lanes.sh'), str(LANES_SOURCE / 'lanes_status.py'), destination + POD_DIR + '/')
@@ -374,6 +380,7 @@ class Runpod:
         self._ssh(pod_id, host, port, f'nohup bash {POD_DIR}/run-lanes.sh {run_id} {lanes} {chunk} '
                                       f'{self.cfg.stagger_seconds} </dev/null >/dev/null 2>&1 &')
         log.info('Batch %s running on %s: %d songs, %d lanes, chunks of %d', run_id, pod_id, songs, lanes, chunk)
+        progress('analyze', 0, math.ceil(songs / chunk))
         status, end, last = None, self.clock() + self.cfg.max_run_minutes * 60, None
         while self.clock() < end:
             self.sleep(self.cfg.poll_seconds)
@@ -383,12 +390,14 @@ class Runpod:
             except (GpuError, ValueError) as error:
                 log.warning('Status temporarily unavailable: %s', error)
                 continue
-            progress = f'{status["done"]}/{status["total"]} chunks done, {status["failed"]} failed'
-            if progress != last:
-                log.info('Pod: %s', progress)
-                last = progress
+            summary = f'{status["done"]}/{status["total"]} chunks done, {status["failed"]} failed'
+            if summary != last:
+                log.info('Pod: %s', summary)
+                progress('analyze', status['done'], status['total'])
+                last = summary
             if status['exit'] is not None:
                 break
+        progress('copy')
         output_dir.mkdir(parents=True, exist_ok=True)
         try:
             self._rsync(pod_id, port, '--ignore-missing-args', destination + f'{LANES_RUN}/results/',
