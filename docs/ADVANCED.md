@@ -291,6 +291,14 @@ on the same Runpod key keep using any region. Originals and
 runtime code are transferred by SSH/rsync; only reports are copied back. The worker
 receives an SSH public key, not the AzuraCast API key.
 
+Data protection: the only content leaving the AzuraCast host is the original audio of
+the songs in a batch (plus the detector's pipeline code). No listener data or
+AzuraCast credentials are sent. The worker uses its container disk only; it and the
+songs on it are deleted when it retires after its idle timeout. A worker whose reports
+could not be copied back is stopped instead and kept until it is recovered or deleted.
+Runpod is a US company; `eu_only` keeps a station's songs in EU data centers. Whether
+this meets a station's legal obligations, such as the GDPR, is for the operator to assess.
+
 Custom worker images are an expert override, not part of normal setup. Existing
 private-image configuration is preserved and skips the anonymous public-image check.
 Its maintainer is responsible for compatibility and Runpod registry credentials.
