@@ -33,6 +33,8 @@ QWEN_REVISIONS = {'Qwen/Qwen3-ASR-1.7B': '7278e1e70fe206f11671096ffdd38061171dd6
                   'Qwen/Qwen3-ForcedAligner-0.6B': 'c7cbfc2048c462b0d63a45797104fc9db3ad62b7'}
 POD_SOURCE = Path(os.environ.get('INTRO_DETECTOR_POD_SOURCE', Path(__file__).resolve().parents[2] / 'pod'))
 LANES_SOURCE = POD_SOURCE.parent / 'gpu'
+EU_COUNTRIES = {'AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GR', 'HR', 'HU', 'IE', 'IT',
+                'LT', 'LU', 'LV', 'MT', 'NL', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK'}
 
 
 class GpuError(RuntimeError):
@@ -80,8 +82,14 @@ def no_stock(output):
                           r'no available (?:gpus|machines|instances)', str(message), re.I))
 
 
+def in_eu(data_center):
+    """Runpod data center IDs name the country second, e.g. EU-RO-1; EUR-IS-1 is Iceland, not EU."""
+    region, _, rest = str(data_center).partition('-')
+    return region in ('EU', 'EUR') and rest.split('-')[0] in EU_COUNTRIES
+
+
 def rank(catalog, settings, songs):
-    """Secure Cloud options ordered by expected batch cost; region does not matter."""
+    """Secure Cloud options ordered by expected batch cost; any region unless EU only."""
     stock_tier = {'high': 3, 'medium': 2, 'low': 1}
     speeds = dict(settings.gpus)
     options = []
@@ -93,12 +101,13 @@ def rank(catalog, settings, songs):
         hours = settings.startup_minutes / 60 + songs * settings.song_seconds / 3600 / speed
         for site in row.get('dataCenterAvailability') or []:
             dc, stock = site.get('dataCenterId'), str(site.get('stockStatus', '')).lower()
-            if dc and stock in stock_tier:
+            if dc and stock in stock_tier and (not settings.eu_only or in_eu(dc)):
                 # Equal cost prefers the faster GPU, then better stock.
                 options.append((round(float(price) * hours, 4), -speed, -stock_tier[stock], dc,
                                 row['gpuId'], float(price), row.get('memoryInGb')))
     if not options:
-        raise NoCapacity('No configured GPU is in stock within the price limit and minimum speed')
+        where = ' in the EU' if settings.eu_only else ''
+        raise NoCapacity(f'No configured GPU is in stock{where} within the price limit and minimum speed')
     return [(gpu_id, dc, price, cost, memory) for cost, _, _, dc, gpu_id, price, memory in sorted(options)]
 
 
@@ -244,10 +253,16 @@ class Runpod:
                     with self.con:
                         self.con.execute('INSERT INTO pods(pod_id, price, created_at, account) VALUES(?,?,?,?)',
                                          (pod['id'], self.cfg.max_price_per_hour, self.clock(), self.account))
-                log.info('Reusing running worker %s', pod['id'])
-                self.progress('worker', detail=dict(phase='reuse'))
-                return pod['id']
-            if pod.get('desiredStatus') == 'EXITED' and row is not None and row['copied']:
+                if self.cfg.eu_only and not in_eu(row['location'] if row is not None else None):
+                    if row is None or not row['copied']:
+                        raise PodBusy(f'Worker {pod["id"]} runs outside the EU and holds uncopied reports')
+                    log.info('Worker %s runs outside the EU; replacing it for EU-only songs', pod['id'])
+                    self.retire(pod['id'], delete=True)
+                else:
+                    log.info('Reusing running worker %s', pod['id'])
+                    self.progress('worker', detail=dict(phase='reuse'))
+                    return pod['id']
+            elif pod.get('desiredStatus') == 'EXITED' and row is not None and row['copied']:
                 self.retire(pod['id'], delete=True)
             else:
                 raise WorkerNeedsRecovery(f'Worker {pod["id"]} is stopped with unconfirmed evidence. Recover or '
@@ -306,8 +321,9 @@ class Runpod:
             if not isinstance(pod_id, str) or not re.fullmatch(r'[a-z0-9]+', pod_id):
                 raise GpuError('Invalid Pod ID; check "runpodctl pod list --all"')
             with self.con:
-                self.con.execute('INSERT OR REPLACE INTO pods(pod_id, gpu_id, gpu_memory_gb, price, created_at, account) '
-                                 'VALUES(?,?,?,?,?,?)', (pod_id, gpu_id, memory, price, self.clock(), self.account))
+                self.con.execute('INSERT OR REPLACE INTO pods(pod_id, gpu_id, gpu_memory_gb, price, created_at, account, '
+                                 'location) VALUES(?,?,?,?,?,?,?)',
+                                 (pod_id, gpu_id, memory, price, self.clock(), self.account, dc))
             log.info('Created worker %s: %s in %s', pod_id, gpu_id, dc)
             self.progress('worker', detail=dict(phase='boot', gpu=gpu_id, location=dc, price=price))
             return pod_id
@@ -569,22 +585,23 @@ class Workers:
                    for slot in self.secrets.slots() if self.account_of_key(self.secrets.get(slot)) == account]
         return int(max(minutes) * 60) if minutes else self.cfg.runpod.idle_seconds
 
-    def settings(self, account):
+    def settings(self, account, eu_only=False):
         # Budgets belong to stations and are checked before a batch; the account itself has no limit.
         return dataclasses.replace(self.cfg.runpod, monthly_budget_usd=0., worker_name=self.worker_name(account),
-                                   idle_seconds=self.idle_seconds(account))
+                                   idle_seconds=self.idle_seconds(account), eu_only=eu_only)
 
-    def get(self, account):
+    def get(self, account, eu_only=False):
+        """The account's worker for one batch; eu_only when any song in it belongs to an EU-only station."""
         key = next((k for k in self.secrets.keys() if self.account_of_key(k) == account), None)
         if key is None:
             raise MissingKey('No station holds the Runpod key of this worker any more')
         worker = self._workers.get(account)
         if worker is None:
             worker = self._workers[account] = Runpod(
-                self.settings(account), self.con, self.cfg.data_dir, call=self.call, sleep=self.sleep,
+                self.settings(account, eu_only), self.con, self.cfg.data_dir, call=self.call, sleep=self.sleep,
                 clock=self.clock, account=account, api_key=key)
         else:
-            worker.cfg = self.settings(account)
+            worker.cfg = self.settings(account, eu_only)
         return worker
 
     def spend(self, account):

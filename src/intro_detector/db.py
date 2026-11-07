@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS station_settings(
   exclude_playlists TEXT NOT NULL DEFAULT '[]',
   budget_usd REAL NOT NULL,
   idle_timeout_minutes REAL NOT NULL DEFAULT 5,
+  eu_only INTEGER NOT NULL DEFAULT 0,
   auto_process INTEGER NOT NULL DEFAULT 1,
   updated_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS instance_settings(
@@ -137,7 +138,9 @@ COLUMNS = (('pods', 'account', "TEXT NOT NULL DEFAULT 'shared'"),
            ('runs', 'account', "TEXT NOT NULL DEFAULT 'shared'"),
            ('runs', 'phase', 'TEXT'),
            ('station_settings', 'max_song_seconds', 'REAL NOT NULL DEFAULT 900'),
-           ('station_settings', 'idle_timeout_minutes', 'REAL NOT NULL DEFAULT 5'))
+           ('station_settings', 'idle_timeout_minutes', 'REAL NOT NULL DEFAULT 5'),
+           ('station_settings', 'eu_only', 'INTEGER NOT NULL DEFAULT 0'),
+           ('pods', 'location', 'TEXT'))
 
 
 def connect(path):

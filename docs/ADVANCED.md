@@ -178,6 +178,7 @@ or with `intro-detector station set`. Settings per station:
 | `exclude_playlists` | `[station_defaults]`, `[]` | Additional playlist IDs excluded from analysis |
 | `budget_usd` | `[runpod] monthly_budget_usd`, `10` | Monthly GPU budget of the station; `0` means none |
 | `idle_timeout_minutes` | `5` | Minutes the GPU worker stays after its last batch (1 to 60) |
+| `eu_only` | `false` | Analyze this station's songs only on workers in EU member states; fewer GPUs, longer waits possible |
 
 Each station also has its own Runpod key (`intro-detector key set <station>`).
 `[azuracast] stations` and `[[stations]]` blocks are read only once, when an existing
@@ -282,7 +283,11 @@ maintainer-release error. Do not work around that failure by choosing an arbitra
 image. Full model/GPU compatibility is a maintainer validation responsibility,
 not something registry metadata alone can establish.
 
-New workers run in Secure Cloud with one GPU and no network volume. Originals and
+New workers run in Secure Cloud with one GPU and no network volume, in the region
+with the lowest expected cost. A batch containing songs of an `eu_only` station runs
+only in data centers of EU member states (not Iceland or Norway): it reuses a running
+worker only inside the EU and otherwise replaces it between batches. Other stations
+on the same Runpod key keep using any region. Originals and
 runtime code are transferred by SSH/rsync; only reports are copied back. The worker
 receives an SSH public key, not the AzuraCast API key.
 

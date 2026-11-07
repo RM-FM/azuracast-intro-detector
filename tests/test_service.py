@@ -280,6 +280,19 @@ class Accounts(QueueCase):
                          [(1, 2), (2, 2)])
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM media WHERE status='done'").fetchone()[0], 4)
 
+    def test_a_batch_is_eu_only_when_one_of_its_stations_requires_it(self):
+        gpu = FakeGpu()
+        service = self.service(gpu, {sha(5): 3., sha(6): 4.})
+        service.settings.update(2, {'eu_only': True})
+        self.upload(5)
+        service.process()
+        self.assertTrue(gpu.eu_only)
+        service.settings.update(2, {'eu_only': False})
+        self.upload(6)
+        service.process()
+        self.assertFalse(gpu.eu_only)
+        self.assertEqual(len(gpu.batches), 2)
+
     def test_station_without_key_downloads_once_then_waits(self):
         gpu = FakeGpu(keys={1: None, 2: 'runpod-b'})
         service = self.service(gpu, {sha(5): 3., sha(6): 4.})

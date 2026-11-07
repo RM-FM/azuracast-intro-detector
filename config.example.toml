@@ -65,7 +65,8 @@ max_price_per_hour = 0.90
 # Prepared image (gpu/Dockerfile): environments and all pinned models baked in.
 image = "ghcr.io/rm-fm/azuracast-intro-detector-gpu:v1"
 # Each batch picks the in-stock Secure Cloud GPU with the lowest expected cost:
-# price * (startup_minutes + songs * song_seconds / speed). Region does not matter.
+# price * (startup_minutes + songs * song_seconds / speed). Any region, unless the batch has
+# songs of a station set to EU only on the Intro Detector page.
 min_speed = 0.5
 startup_minutes = 5.0
 song_seconds = 15.0

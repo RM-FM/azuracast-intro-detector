@@ -39,8 +39,9 @@ class FakeWorkers:
     def account(self, station_id):
         return self.keys.get(station_id, 'runpod-test')
 
-    def get(self, account):
+    def get(self, account, eu_only=False):
         self.accounts = getattr(self, 'accounts', []) + [account]
+        self.eu_only = eu_only
         return self
 
     def blocked(self, station_id):

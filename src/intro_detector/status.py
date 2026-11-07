@@ -40,7 +40,7 @@ def worker(con, account, idle_seconds=None):
     """The account's running worker; shutdown_at is when an idle worker is retired, None while it works."""
     if account is None:
         return None
-    row = con.execute('SELECT pod_id, gpu_id, price, created_at, idle_since, copied FROM pods '
+    row = con.execute('SELECT pod_id, gpu_id, price, created_at, idle_since, copied, location FROM pods '
                       'WHERE account=? AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1', (account,)).fetchone()
     if row is None:
         return None

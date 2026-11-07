@@ -320,8 +320,9 @@ class Service:
         self._progress('worker', songs=sum(per_station.values()),
                        stations={str(k): v for k, v in per_station.items()})
         worker = None
+        eu_only = any(self.settings.get(station_id).eu_only for station_id in per_station)
         try:
-            worker = self.gpus.get(account)
+            worker = self.gpus.get(account, eu_only=eu_only)
             worker.run(songs, reports, self._progress)
             report, music = evidence.load_reports(reports / 'report.json', reports / 'music-report.json')
         except (GpuError, OSError, ValueError, BlockingIOError) as error:

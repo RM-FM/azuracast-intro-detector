@@ -79,6 +79,8 @@ class Runpod:
     poll_seconds: int = 30
     # Initial monthly GPU budget of a station (estimated spend per UTC month; 0 disables the limit).
     monthly_budget_usd: float = 10.0
+    # Rent workers only in data centers of EU member states; set per batch from its stations.
+    eu_only: bool = False
 
 
 @dataclass(frozen=True)

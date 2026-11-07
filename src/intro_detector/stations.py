@@ -114,6 +114,8 @@ class StationSettings:
     budget_usd: float = 10.0
     # Minutes a GPU worker stays after its last batch; a shared worker uses the longest of its stations.
     idle_timeout_minutes: float = 5.0
+    # Analyze this station's songs only on GPU workers in the EU; other stations on the key keep any region.
+    eu_only: bool = False
 
     @property
     def station(self):
@@ -132,7 +134,7 @@ def _validated(settings, changes):
     if unknown:
         raise ValueError(f'Unknown station settings: {sorted(unknown)}')
     values = dict(changes)
-    for name in ('enabled', 'auto_process'):
+    for name in ('enabled', 'auto_process', 'eu_only'):
         if name in values:
             _bool(name, values[name])
 
@@ -165,7 +167,7 @@ class Stations:
     @staticmethod
     def _from_row(row):
         values = {f.name: row['station_id' if f.name == 'id' else f.name] for f in fields(StationSettings)}
-        for name in ('enabled', 'auto_process'):
+        for name in ('enabled', 'auto_process', 'eu_only'):
             values[name] = bool(values[name])
         values['exclude_playlists'] = tuple(json.loads(values['exclude_playlists']))
         return StationSettings(**values)

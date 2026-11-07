@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from helpers import Clock, database, make_config, tempdir
 from intro_detector.config import Runpod as Settings
-from intro_detector.gpu import (GpuError, MissingKey, NoCapacity, Runpod, Workers, account_spend, lane_plan,
+from intro_detector.gpu import (GpuError, MissingKey, NoCapacity, PodBusy, Runpod, Workers, account_spend, lane_plan,
                                 merge_chunks, month_spend, no_stock, rank, station_spend)
 from intro_detector.stations import Instance, Secrets, Stations, key_account, key_slot, runpod_account
 
@@ -65,6 +65,14 @@ class Ranking(unittest.TestCase):
         order = [(gpu, dc) for gpu, dc, *_ in rank(CATALOG, Settings(gpus=MIXED), songs=100)]
         self.assertEqual(order, [('NVIDIA RTX A5000', 'US-KS-2'), ('NVIDIA GeForce RTX 4090', 'EU-SE-1'),
                                  ('NVIDIA GeForce RTX 4090', 'US-TX-3'), ('NVIDIA GeForce RTX 4090', 'EU-RO-1')])
+
+    def test_eu_only_skips_other_regions_and_european_countries_outside_the_eu(self):
+        catalog = CATALOG + [{'gpuId': 'NVIDIA GeForce RTX 4090', 'secureCloud': True, 'securePricePerHr': .5,
+                              'dataCenterAvailability': [{'dataCenterId': 'EUR-IS-1', 'stockStatus': 'High'}]}]
+        order = [dc for _, dc, *_ in rank(catalog, Settings(eu_only=True), songs=100)]
+        self.assertEqual(order, ['EU-SE-1', 'EU-RO-1'])
+        with self.assertRaisesRegex(NoCapacity, 'in the EU'):
+            rank(CATALOG, Settings(gpus=MIXED[1:2], eu_only=True), songs=1)
 
     def test_minimum_speed_price_cap_and_unlisted_gpus(self):
         order = {gpu for gpu, *_ in rank(CATALOG, Settings(gpus=MIXED, min_speed=.6), songs=100)}
@@ -149,6 +157,32 @@ class Lifecycle(unittest.TestCase):
                              ('old', 10., self.clock() - 7200, self.clock() - 1, 'default'))
         with self.assertRaises(GpuError):
             self.runpod(Fake(), monthly_budget_usd=5.).ensure_worker()
+
+    def test_eu_only_reuses_eu_workers_and_replaces_others_between_batches(self):
+        for location, reused in (('EU-RO-1', True), ('US-TX-3', False), (None, False)):
+            with self.subTest(location=location):
+                fake = Fake([{'id': 'abc', 'name': 'azuracast-intro-detector', 'desiredStatus': 'RUNNING'}])
+                with self.con:
+                    self.con.execute('DELETE FROM pods')
+                    self.con.execute('INSERT INTO pods(pod_id, price, created_at, copied, location) VALUES(?,?,?,?,?)',
+                                     ('abc', .89, self.clock(), 1, location))
+                self.assertEqual(self.runpod(fake, eu_only=True).ensure_worker(), 'abc' if reused else 'newpod1')
+                self.assertEqual(['runpodctl', 'pod', 'delete', 'abc'] in fake.commands, not reused)
+                if not reused:
+                    create = next(c for c in fake.commands if c[:3] == ['runpodctl', 'pod', 'create'])
+                    self.assertEqual(create[create.index('--data-center-ids') + 1], 'EU-SE-1')
+                    self.assertEqual(self.con.execute("SELECT location FROM pods WHERE pod_id='newpod1'").fetchone()[0],
+                                     'EU-SE-1')
+
+    def test_eu_only_keeps_a_worker_outside_the_eu_with_uncopied_reports(self):
+        fake = Fake([{'id': 'abc', 'name': 'azuracast-intro-detector', 'desiredStatus': 'RUNNING'}])
+        with self.con:
+            self.con.execute('INSERT INTO pods(pod_id, price, created_at, copied, location) VALUES(?,?,?,?,?)',
+                             ('abc', .89, self.clock(), 0, 'US-TX-3'))
+        with self.assertRaises(PodBusy):
+            self.runpod(fake, eu_only=True).ensure_worker()
+        self.assertFalse(any(c[:3] == ['runpodctl', 'pod', 'delete'] for c in fake.commands))
+        self.assertEqual(self.runpod(fake).ensure_worker(), 'abc', 'Songs without EU-only stations use it')
 
     def test_stopped_worker_without_copy_needs_manual_recovery(self):
         fake = Fake([{'id': 'abc', 'name': 'azuracast-intro-detector', 'desiredStatus': 'EXITED'}])
@@ -283,6 +317,16 @@ class Accounts(unittest.TestCase):
         self.assertEqual(self.workers.idle_seconds(self.workers.account(1)), 1200)
         self.assertEqual(self.workers.get(self.workers.account(1)).cfg.idle_seconds, 1200)
         self.assertEqual(self.workers.idle_seconds(self.workers.account(3)), 3600)
+
+    def test_eu_only_is_decided_per_batch_not_per_account(self):
+        for station_id in (1, 2):
+            self.secrets.set(key_slot(station_id), 'rpa_SHAREDKEY12345')
+        self.stations.update(2, {'eu_only': True})
+        account = self.workers.account(1)
+        self.assertFalse(self.workers.get(account).cfg.eu_only)
+        self.assertTrue(self.workers.get(account, eu_only=True).cfg.eu_only)
+        with self.assertRaises(ValueError):
+            self.stations.update(1, {'eu_only': 'yes'})
 
     def test_migrated_workers_keep_their_runpod_name(self):
         self.secrets.set(key_slot(1), 'rpa_STATIONKEY1234')

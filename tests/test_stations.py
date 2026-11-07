@@ -122,7 +122,7 @@ class Migration(unittest.TestCase):
                              'budget_usd REAL NOT NULL, shared_allowed INTEGER NOT NULL DEFAULT 0, '
                              'shared_cap_usd REAL NOT NULL DEFAULT 0, auto_process INTEGER NOT NULL DEFAULT 1, '
                              'updated_at REAL NOT NULL, max_song_seconds REAL NOT NULL DEFAULT 900, '
-                             'idle_timeout_minutes REAL NOT NULL DEFAULT 5)')
+                             'idle_timeout_minutes REAL NOT NULL DEFAULT 5, eu_only INTEGER NOT NULL DEFAULT 0)')
             self.con.executemany('INSERT INTO station_settings(station_id, enabled, min_song_seconds, billing, '
                                  'budget_usd, updated_at) VALUES(?, 1, 60, ?, 10, 0)',
                                  [(1, 'shared'), (2, 'shared'), (3, 'own'), (4, 'own')])
