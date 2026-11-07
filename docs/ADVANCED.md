@@ -129,6 +129,7 @@ or with `intro-detector station set`. Settings per station:
 | `max_song_seconds` | `900` | Skip longer files, such as DJ mixes; `0` means no maximum |
 | `exclude_playlists` | `[station_defaults]`, `[]` | Additional playlist IDs excluded from analysis |
 | `budget_usd` | `[runpod] monthly_budget_usd`, `10` | Monthly GPU budget of the station; `0` means none |
+| `idle_timeout_minutes` | `5` | Minutes the GPU worker stays after its last batch (1 to 60) |
 
 Each station also has its own Runpod key (`intro-detector key set <station>`).
 `[azuracast] stations` and `[[stations]]` blocks are read only once, when an existing
@@ -246,8 +247,8 @@ Its maintainer is responsible for compatibility and Runpod registry credentials.
 The README's **US$2-$6 per 1,000 first-time tracks** is a planning range for prepared
 RTX 4090 workers and batched processing, not a measured guarantee for every workload.
 The GPU ranking defaults use 15 seconds per song for one lane and five minutes of
-startup; three overlapping lanes can reduce wall time. Cold startup and the ten-minute
-idle retirement interval matter most for small batches. Storage, retries, image
+startup; three overlapping lanes can reduce wall time. Cold startup and the idle timeout
+matter most for small batches. Storage, retries, image
 downloads, provider billing and changing rates can add cost.
 
 Previously analyzed audio is reused by SHA256 across stations without GPU inference.
@@ -273,8 +274,13 @@ stopped worker keeps its recorded end time. There is no daily-budget setting.
 Other `[runpod]` settings control allowed GPU types and relative speed, minimum
 speed, worker disk size, wait time, maximum batch runtime and parallel lanes.
 Defaults use RTX 4090, an 80 GB worker disk, three lanes, 7 GB reserved VRAM per lane,
-ten-song chunks and staggered lane startup. An idle worker retires after 600 seconds;
+ten-song chunks and staggered lane startup. An idle worker retires after its idle timeout;
 uncopied reports cause it to be stopped, not automatically deleted.
+
+Each station sets an **idle timeout** of 1 to 60 minutes (default 5): how long the GPU worker
+stays after its last batch, so that further songs start without a new worker. A shared worker
+uses the longest idle timeout of its stations. Five minutes is about as long as starting a new
+worker takes, so waiting longer than a new start would cost rarely pays off.
 
 ## How detection works
 

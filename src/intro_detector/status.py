@@ -93,7 +93,7 @@ def station(service, station_id):
         key=None if account is None else key_summary(service, account, now),
         spend_month_usd=round(station_spend(con, station_id, now), 4),
         limit_usd=settings.budget_usd,
-        worker=worker(con, account, service.cfg.runpod.idle_seconds),
+        worker=worker(con, account, service.gpus.idle_seconds(account) if account else None),
         recovery=service.recovery(account) if account else None,
         activity=activity(service, station_id),
         now=now,

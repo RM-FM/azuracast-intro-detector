@@ -51,6 +51,9 @@ class FakeWorkers:
     def key_stations(self, account):
         return 1
 
+    def idle_seconds(self, account):
+        return 600
+
     def balance(self, account, refresh=False):
         return None
 

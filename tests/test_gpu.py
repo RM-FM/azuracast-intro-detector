@@ -275,6 +275,15 @@ class Accounts(unittest.TestCase):
         self.workers.resolve_keys()
         self.assertEqual(self.workers.account(1), runpod_account('user-1'))
 
+    def test_a_shared_worker_waits_for_the_longest_idle_timeout_of_its_stations(self):
+        self.assertEqual(self.workers.idle_seconds('runpod-none'), 600)
+        for station_id, minutes in ((1, 5), (2, 20), (3, 60)):
+            self.secrets.set(key_slot(station_id), 'rpa_SHAREDKEY12345' if station_id < 3 else 'rpa_OTHERKEY123456')
+            self.stations.update(station_id, {'idle_timeout_minutes': minutes})
+        self.assertEqual(self.workers.idle_seconds(self.workers.account(1)), 1200)
+        self.assertEqual(self.workers.get(self.workers.account(1)).cfg.idle_seconds, 1200)
+        self.assertEqual(self.workers.idle_seconds(self.workers.account(3)), 3600)
+
     def test_migrated_workers_keep_their_runpod_name(self):
         self.secrets.set(key_slot(1), 'rpa_STATIONKEY1234')
         account = self.workers.account(1)

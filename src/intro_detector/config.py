@@ -70,6 +70,7 @@ class Runpod:
     stagger_seconds: int = 60
     worker_name: str = 'azuracast-intro-detector'
     ssh_key: str = '/secrets/runpod-ssh-key'
+    # Only for a worker none of whose stations holds its key any more; stations set their own idle timeout.
     idle_seconds: int = 600
     wait_minutes: int = 20
     retry_seconds: int = 30

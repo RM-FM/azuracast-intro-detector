@@ -563,9 +563,16 @@ class Workers:
         names = self.instance.marker('worker_names') or {}
         return names.get(account) or f'{self.cfg.runpod.worker_name}-{account.removeprefix("runpod-")[:8]}'
 
+    def idle_seconds(self, account):
+        """Idle timeout of the account's worker: the longest of its stations, so none cuts another short."""
+        minutes = [self.stations.get(int(slot.removeprefix('station-'))).idle_timeout_minutes
+                   for slot in self.secrets.slots() if self.account_of_key(self.secrets.get(slot)) == account]
+        return int(max(minutes) * 60) if minutes else self.cfg.runpod.idle_seconds
+
     def settings(self, account):
         # Budgets belong to stations and are checked before a batch; the account itself has no limit.
-        return dataclasses.replace(self.cfg.runpod, monthly_budget_usd=0., worker_name=self.worker_name(account))
+        return dataclasses.replace(self.cfg.runpod, monthly_budget_usd=0., worker_name=self.worker_name(account),
+                                   idle_seconds=self.idle_seconds(account))
 
     def get(self, account):
         key = next((k for k in self.secrets.keys() if self.account_of_key(k) == account), None)

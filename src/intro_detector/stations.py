@@ -112,6 +112,8 @@ class StationSettings:
     exclude_playlists: tuple = ()
     # Estimated GPU spend of this station per UTC month; 0 disables the limit.
     budget_usd: float = 10.0
+    # Minutes a GPU worker stays after its last batch; a shared worker uses the longest of its stations.
+    idle_timeout_minutes: float = 5.0
 
     @property
     def station(self):
@@ -142,6 +144,8 @@ def _validated(settings, changes):
         values['exclude_playlists'] = _playlists(values['exclude_playlists'])
     if 'budget_usd' in values:
         values['budget_usd'] = _number('budget_usd', values['budget_usd'], 0, MAX_USD)
+    if 'idle_timeout_minutes' in values:
+        values['idle_timeout_minutes'] = _number('idle_timeout_minutes', values['idle_timeout_minutes'], 1, 60)
     updated = replace(settings, **values)
     if updated.max_song_seconds and updated.max_song_seconds <= updated.min_song_seconds:
         raise ValueError('max_song_seconds must be above min_song_seconds, or 0 for no maximum')

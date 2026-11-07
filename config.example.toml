@@ -78,6 +78,7 @@ chunk_songs = 10
 stagger_seconds = 60
 worker_name = "azuracast-intro-detector"
 ssh_key = "/secrets/runpod-ssh-key"
+# Idle timeout of a worker none of whose stations holds its key any more; stations set their own.
 idle_seconds = 600
 wait_minutes = 20
 max_run_minutes = 240

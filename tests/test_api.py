@@ -86,8 +86,8 @@ class ApiTests(unittest.TestCase):
                         ('q', 'NVIDIA GeForce RTX 4090', .89, self.clock() - 300, self.clock() - 60, ACCOUNT))
         con.close()
         worker = self.call('GET', '/api/v1/stations/4')[1]['worker']
-        self.assertEqual((worker['gpu_id'], worker['shutdown_at']), ('NVIDIA GeForce RTX 4090', self.clock() + 540),
-                         'An idle worker shuts down ten minutes after its last batch')
+        self.assertEqual((worker['gpu_id'], worker['shutdown_at']), ('NVIDIA GeForce RTX 4090', self.clock() + 240),
+                         'An idle worker shuts down five minutes after its last batch')
         self.assertEqual(body['library_estimate_usd'], 0., 'Estimates use the cost per song so far')
         self.assertIsNone(self.call('GET', '/api/v1/stations/5')[1]['key'])
 
