@@ -12,7 +12,9 @@ MAX_DOWNLOAD = 1024 ** 3
 
 
 class AzuraCastError(RuntimeError):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 class _Redirects(urllib.request.HTTPRedirectHandler):
@@ -41,7 +43,7 @@ class Client:
             return self.opener.open(request, timeout=self.timeout)
         except urllib.error.HTTPError as error:
             detail = error.read(400).decode('utf-8', 'replace').strip()
-            raise AzuraCastError(f'{method} {path}: HTTP {error.code} {detail}') from None
+            raise AzuraCastError(f'{method} {path}: HTTP {error.code} {detail}', error.code) from None
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise AzuraCastError(f'{method} {path}: {error}') from None
 
@@ -92,12 +94,21 @@ class Client:
 
     def download(self, station_id, media_id, directory, suffix):
         """Stream the original file, returning (path, sha256). Name is <sha256><suffix>."""
+        try:
+            return self._download(f'/api/station/{int(station_id)}/file/{int(media_id)}/play', media_id, directory, suffix)
+        except AzuraCastError as error:
+            if error.status != 404:
+                raise
+        # AzuraCast's play route fails for file names containing "%"; the Sweepers plugin streams them directly.
+        return self._download(f'/api/station/{int(station_id)}/sweepers/file/{int(media_id)}', media_id, directory, suffix)
+
+    def _download(self, path, media_id, directory, suffix):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         digest, size = hashlib.sha256(), 0
         fd, temporary = tempfile.mkstemp(dir=directory, suffix='.part')
         try:
-            with os.fdopen(fd, 'wb') as out, self._open('GET', f'/api/station/{int(station_id)}/file/{int(media_id)}/play') as response:
+            with os.fdopen(fd, 'wb') as out, self._open('GET', path) as response:
                 while block := response.read(1024 * 1024):
                     size += len(block)
                     if size > MAX_DOWNLOAD:

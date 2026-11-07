@@ -41,6 +41,10 @@ class Handler(BaseHTTPRequestHandler):
             return None
         if self.path == '/storage/8':
             return self.reply(200, b'redirected')
+        if self.path == '/api/station/1/sweepers/file/9':
+            return self.reply(200, b'100%-audio', 'audio/mpeg')
+        if self.path == '/api/station/1/file/10/play':
+            return self.reply(500, {})
         if self.path == '/api/station/1/file/7':
             return self.reply(200, {'id': 7, 'custom_fields': {'intro_end': '3'}})
         return self.reply(404, {})
@@ -75,6 +79,15 @@ class ClientTest(unittest.TestCase):
             path, sha = self.client.download(1, 7, tmp, '.mp3')
             self.assertEqual(sha, hashlib.sha256(b'ID3-audio').hexdigest())
             self.assertEqual(path.name, sha + '.mp3')
+
+    def test_failed_play_route_falls_back_to_the_plugin_download(self):
+        with tempdir() as tmp:
+            _, sha = self.client.download(1, 9, tmp, '.mp3')
+            self.assertEqual(sha, hashlib.sha256(b'100%-audio').hexdigest())
+            with self.assertRaises(AzuraCastError) as raised:
+                self.client.download(1, 10, tmp, '.mp3')
+        self.assertEqual(raised.exception.status, 500, 'Only a missing file uses the fallback')
+        self.assertNotIn(('/api/station/1/sweepers/file/10', 'k'), Handler.seen)
 
     def test_redirect_to_other_host_drops_api_key(self):
         with tempdir() as tmp:
