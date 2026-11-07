@@ -43,3 +43,5 @@ if ! bash bin/setup.sh --azuracast-dir "$azuracast_dir" --unattended; then
     fi
     fail "The update to $version failed; the previous version was restored."
 fi
+# The rollback copy is only needed while the update runs.
+docker image rm azuracast-intro-detector:previous >/dev/null 2>&1 || true

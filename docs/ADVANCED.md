@@ -84,6 +84,11 @@ If setup fails, its message gives the private technical log and settings-backup 
 tag and reruns setup unattended. If setup fails, the previous release and image run
 again. The plugin's setup calls it with the release in its `detector.version`.
 
+Every setup cleans up after itself: it removes the replaced service image, keeps the five
+newest `.setup-backups`, and limits Docker's build cache to 1 GB. Docker manages that cache
+for the whole host; AzuraCast pulls its images and builds none. A successful update also
+removes the `azuracast-intro-detector:previous` rollback image.
+
 The detector reaches AzuraCast through the public site address. Private-network
 HTTP is supported only with `[azuracast] allow_http = true`; AzuraCast redirects plain
 HTTP when "Always Use HTTPS" is on. Custom `COMPOSE_FILE` setups require manual installation.

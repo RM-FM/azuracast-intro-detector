@@ -64,6 +64,7 @@ if ((available < 5242880)); then status 'WARNING: Less than 5 GB free; make spac
 status 'Building the detector service. This does not start a GPU worker...\n'
 build_context=$(mktemp "${TMPDIR:-/tmp}/intro-detector-context.XXXXXX.tar")
 bash bin/image-context.sh service "$build_context"
+old_image=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)
 docker build --tag "$image" - < "$build_context"
 rm -f -- "$build_context"
 build_context=""
@@ -165,5 +166,15 @@ if [[ -n "$plugin_dir" ]]; then
     chmod 640 "$plugin_dir/.detector.json"
     status 'Connected to the Sweepers plugin: manage it in Sweepers > Intro Detector.\n'
 fi
+# Housekeeping: the replaced service image, older settings backups and build cache beyond 1 GB.
+new_image=$(docker image inspect --format '{{.Id}}' "$image")
+if [[ -n "$old_image" && "$old_image" != "$new_image" ]]; then
+    docker image rm "$old_image" >/dev/null 2>&1 || true
+fi
+find .setup-backups -mindepth 1 -maxdepth 1 -name 'setup.*' -printf '%T@ %p\0' 2>/dev/null | sort -z -rn | tail -z -n +6 | \
+    cut -z -d' ' -f2- | xargs -0 -r rm -rf --
+# Docker limits the build cache only for the whole host; AzuraCast pulls its images and builds nothing.
+docker builder prune --force --max-used-space 1gb >/dev/null 2>&1 || \
+    docker builder prune --force --keep-storage 1gb >/dev/null 2>&1 || true
 status '\nDetector installed/updated. Existing settings and stored analyses are kept.\n'
 status 'Stations and Runpod keys are managed in Sweepers > Intro Detector.\n'

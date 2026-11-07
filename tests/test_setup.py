@@ -123,6 +123,9 @@ elif args[:2] == ['compose', '--project-directory'] and 'ps' in args:
     print('' if os.environ.get('NO_WEB') else 'web-container')
 elif args[:1] == ['inspect'] and 'web-container' in args:
     print('azuracast_default')
+elif args[:2] == ['image', 'inspect']:
+    builds = (root / 'calls.jsonl').read_text().count('"build"')
+    print(f'sha256:build{builds}')
 elif args[:2] == ['exec', 'web-container']:
     print('1000')
 elif 'ssh-keygen' in args:
@@ -211,6 +214,19 @@ elif args[:2] == ['compose', 'run'] and os.environ.get('FAIL_CHECK'):
         result = self.run_setup('\n')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(before, [path.read_bytes() for path in (config, self.root / '.env', self.root / 'secrets/runpod-ssh-key')])
+
+    def test_setup_removes_the_replaced_image_older_backups_and_build_cache(self):
+        backups = self.root / '.setup-backups'
+        for number in range(7):
+            (backups / f'setup.old{number}').mkdir(parents=True)
+            os.utime(backups / f'setup.old{number}', (number, number))
+        result = self.run_setup('https://radio.example\nazura-test-key\nrunpod-test-key\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(['image', 'rm', 'sha256:build0'], self.calls())
+        self.assertTrue(any(call[:2] == ['builder', 'prune'] for call in self.calls()))
+        kept = sorted(path.name for path in backups.iterdir())
+        self.assertEqual(len(kept), 5)
+        self.assertNotIn('setup.old0', kept, 'The oldest backups are removed')
 
     def test_failed_credentials_do_not_restart_service(self):
         result = self.run_setup('https://radio.example\nazura-test-key\nrunpod-test-key\n', fail_check=True)
@@ -328,6 +344,7 @@ class UpdateScript(unittest.TestCase):
         self.assertEqual(self.head(), 'v1.0.0')
         self.assertIn(f'v1.0.0 --azuracast-dir {self.azuracast} --unattended', self.log('setup.log'))
         self.assertIn('image tag azuracast-intro-detector:local azuracast-intro-detector:previous', self.log('docker.log'))
+        self.assertIn('image rm azuracast-intro-detector:previous', self.log('docker.log'), 'The rollback copy goes after success')
 
     def test_failed_setup_restores_the_previous_release(self):
         result = self.update(FAIL_SETUP='1')
