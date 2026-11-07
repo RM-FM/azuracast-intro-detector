@@ -126,8 +126,15 @@ class ApiTests(unittest.TestCase):
         code, body = self.call('POST', '/api/v1/stations/1/backfill', {'dry_run': True})
         self.assertEqual((code, body['songs'], body['station']['queue']), (200, 2, {'known': 2}))
         self.assertEqual((body['station']['library_without_intro'], body['station']['library_estimate_usd']), (2, None))
-        self.assertEqual(self.call('POST', '/api/v1/stations/1/backfill')[1]['station']['queue'], {'pending': 2})
 
+        self.assertEqual(self.call('POST', '/api/v1/stations/1/backfill')[1]['station']['queue'], {'pending': 2})
+        con = database(self.tmp.name)
+        with con:
+            con.execute("UPDATE media SET status='done' WHERE media_id=1")
+            con.execute("INSERT INTO publications VALUES(1, 2, 'abc', 'p', 3., 'written', 0)")
+        con.close()
+        self.assertEqual(self.call('GET', '/api/v1/stations/1')[1]['analyzed'], 2,
+                         'A song with a written intro counts as analyzed also after its file changed')
     def test_retiring_unconfirmed_workers_needs_force(self):
         self.assertEqual(self.call('POST', '/api/v1/stations/3/worker/retire')[0], 409)
         self.call('PUT', '/api/v1/stations/3/key', {'key': KEY})

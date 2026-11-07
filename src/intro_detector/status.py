@@ -85,6 +85,10 @@ def station(service, station_id):
         queue=_counts(con, 'SELECT status, COUNT(*) FROM media WHERE station_id=? GROUP BY status', (station_id,)),
         publications=_counts(con, 'SELECT state, COUNT(*) FROM publications WHERE station_id=? GROUP BY state',
                              (station_id,)),
+        # Songs with a detector result, also those whose file changed after their analysis.
+        analyzed=con.execute("SELECT COUNT(*) FROM media m WHERE m.station_id=? AND m.status NOT IN ('deleted', 'excluded') "
+                             "AND (m.status='done' OR EXISTS (SELECT 1 FROM publications p WHERE p.station_id=m.station_id "
+                             'AND p.media_id=m.media_id))', (station_id,)).fetchone()[0],
         library_without_intro=library,
         library_estimate_usd=estimate(con, library),
         process_requested=station_id in service.requests(),
