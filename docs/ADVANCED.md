@@ -1,8 +1,49 @@
 # Advanced guide
 
-For the ordinary install and update workflow, start with the [README](../README.md).
-Commands below run from the detector checkout. Use a root shell or prefix Docker
-and file-administration commands with `sudo`.
+The detector is normally installed, updated and configured through the
+[Sweepers plugin](https://github.com/RM-FM/azuracast-sweepers). This guide covers what
+happens behind it and the cases it does not handle. Commands below run from the detector
+checkout. Use a root shell or prefix Docker and file-administration commands with `sudo`.
+
+## Requirements
+
+AzuraCast with the Sweepers plugin on a Linux x86_64 server with Docker Compose v2.20 or
+newer, Git and root access. The AzuraCast **Site Base URL** (Administration → System
+Settings) must be set.
+
+## Installation and updates through Sweepers
+
+The Sweepers plugin's setup offers the detector when the plugin is installed. To add it
+later, run in the plugin directory:
+
+```bash
+cd /var/azuracast/plugins/azuracast-sweepers
+sudo bash bin/setup.sh --detector
+```
+
+The detector is installed to `/opt/azuracast-intro-detector`, gets its own AzuraCast
+account and joins AzuraCast's Docker network. It opens no port and does not restart
+AzuraCast or interrupt broadcasting. No API key is entered on the command line.
+
+It is updated with the plugin: `sudo bash bin/setup.sh` in the plugin directory moves it
+to the release that plugin version expects. Stored analyses, station settings and intro
+values are kept.
+
+Logs of the running service:
+
+```bash
+cd /opt/azuracast-intro-detector
+sudo docker compose logs --tail 50 detector
+```
+
+## Runpod API key
+
+1. Sign in to [Runpod](https://console.runpod.io/) and add funds to the account.
+2. Open [Credentials](https://console.runpod.io/user/credentials), select **API Keys**
+   and click **Create API Key**.
+3. Name it for the detector. Give it read/write access for Pod and GPU management;
+   a **Read Only** key cannot create or stop workers. You do not need an S3 key.
+4. Keep the key in a password manager; it is entered only on the Intro Detector page.
 
 ## Installation and Compose
 
@@ -49,9 +90,11 @@ HTTP when "Always Use HTTPS" is on. Custom `COMPOSE_FILE` setups require manual 
 
 ## Manual installation
 
-Clone the checkout as shown in the README, then prepare the files:
+Clone a release next to AzuraCast and prepare the files:
 
 ```bash
+git clone --branch vX.Y.Z https://github.com/RM-FM/azuracast-intro-detector.git /opt/azuracast-intro-detector
+cd /opt/azuracast-intro-detector
 cp config.example.toml config.toml
 cp .env.example .env
 nano config.toml
@@ -244,7 +287,7 @@ Its maintainer is responsible for compatibility and Runpod registry credentials.
 
 ## Costs and limits
 
-The README's **US$2-$6 per 1,000 first-time tracks** is a planning range for prepared
+The README's **USD 2 to 6 per 1,000 new songs** is a planning range for prepared
 RTX 4090 workers and batched processing, not a measured guarantee for every workload.
 The GPU ranking defaults use 15 seconds per song for one lane and five minutes of
 startup; three overlapping lanes can reduce wall time. Cold startup and the idle timeout
@@ -300,6 +343,16 @@ musical cue just because one exists.
 Published values are original-file seconds: blank stays unknown, zero means no usable
 intro, and a positive number is the measured handover. Only `intro_end` is updated
 through the Sweepers endpoint; other custom fields are preserved.
+
+## Intro end values
+
+Values are seconds from the **original file start**, not from an AutoCue cue-in:
+
+| Value | Meaning |
+| --- | --- |
+| Blank | Unknown or unresolved; left untouched |
+| `0` | No usable intro; no sweeper |
+| Positive | Measured usable intro end |
 
 ## Manual-value protection
 

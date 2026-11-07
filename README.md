@@ -1,113 +1,44 @@
 # AzuraCast Intro Detector
 
-Detects song intros for the [AzuraCast Sweepers](https://github.com/RM-FM/azuracast-sweepers)
-plugin. It runs next to AzuraCast and rents Runpod GPU workers when a song needs
-analysis. No local GPU is required.
+Finds where song intros end for the [AzuraCast Sweepers](https://github.com/RM-FM/azuracast-sweepers)
+plugin: where the vocals start or, in songs that open without vocals, where the musical
+intro ends. The result becomes the song's intro end in AzuraCast, so sweepers fit
+automatically.
 
-Each station switches it on in **Sweepers → Intro Detector** with a Runpod API key and
-a monthly budget. Intros it finds are written to AzuraCast right away; intro values
-entered by hand are never overwritten.
+> [!IMPORTANT]
+> Install and manage the detector through the Sweepers plugin. The plugin's setup installs
+> and updates it when you choose it, and **Sweepers → Intro Detector** configures it per
+> station. Manual installation is not recommended; see the [advanced guide](docs/ADVANCED.md)
+> if you need it anyway.
 
-Start with one station and listen to the results; installation does not validate
-detection accuracy for your library.
+How to switch it on, enter a Runpod key and analyze existing songs is described in the
+Sweepers README under [Intro Detector](https://github.com/RM-FM/azuracast-sweepers#intro-detector-optional).
 
-## Quick Start
+## How it works
 
-You need AzuraCast with the Sweepers plugin on a Linux x86_64 server with Docker
-Compose v2.20 or newer, Git and root access. The AzuraCast **Site Base URL**
-(Administration → System Settings) must be set.
+- **Next to AzuraCast:** the detector runs in its own container on the AzuraCast server.
+  It finds new uploads of the stations that use it and needs no open port.
+- **GPU on demand:** songs are analyzed on a GPU rented at [Runpod](https://www.runpod.io/)
+  only while there is work; no local GPU is needed. A worker starts for a batch of songs
+  and shuts down after the station's idle timeout. Stations on the same Runpod account
+  share one worker.
+- **Analysis:** the first 30 seconds of each song are examined. The vocals are separated
+  from the music, transcribed with several speech models and checked by a singing
+  detector; the musical structure is measured as well. The results are combined into one
+  intro end. If they do not agree, the intro end stays blank.
+- **Each file once:** a file that was analyzed before, for any station, is reused at no
+  cost.
+- **Safe writing:** only the intro end is written. Intros entered or corrected by hand
+  are never overwritten.
 
-### Install
-
-The Sweepers plugin's setup offers the detector when the plugin is installed. To add
-it later, run in the plugin directory:
-
-```bash
-cd /var/azuracast/plugins/azuracast-sweepers
-sudo bash bin/setup.sh --detector
-```
-
-The detector is installed to `/opt/azuracast-intro-detector`, gets its own AzuraCast
-account and joins AzuraCast's Docker network. It opens no port and does not restart
-AzuraCast or interrupt broadcasting. No API key is entered on the command line.
-
-### Update
-
-The detector is updated with the plugin: `sudo bash bin/setup.sh` in the plugin
-directory moves it to the release that plugin version expects. Stored analyses,
-station settings and intro values are kept.
-
-For installation without the plugin's setup, see [manual installation](docs/ADVANCED.md#manual-installation).
-
-## First station setup
-
-#### Get a Runpod API key
-
-1. Sign in to [Runpod](https://console.runpod.io/) and add funds to the account.
-2. Open [Credentials](https://console.runpod.io/user/credentials), select **API Keys**
-  and click **Create API Key**.
-3. Name it for the detector. Give it read/write access for Pod and GPU management;
-  a **Read Only** key cannot create or stop workers. You do not need an S3 key.
-4. Keep the key in a password manager; it is entered only on the detector page.
-
-Use one key for several stations or a separate key per station, whichever suits how
-you pay for them. Stations whose keys belong to the same Runpod account share one GPU
-worker; each station keeps its own monthly budget.
-
-#### Enable the station
-
-1. Open **Sweepers → Intro Detector** for the station. Changing it needs the station's
-  broadcasting permission.
-2. Switch the detector on, enter the Runpod key and a monthly budget, and save. New
-  uploads are analyzed automatically from now on and their intros written to AzuraCast.
-3. To analyze songs already in the library, check **Older songs** on the Status tab: it
-  shows the number of songs, the estimated cost and the budget left; **Analyze them** starts.
-  **Processing uses paid GPU time** unless an identical file was analyzed before.
-4. Listen to the results in Sweepers' Intro Manager and correct any intro there; a
-  corrected value counts as entered by hand and is kept.
-5. Validate station playback with sweepers before enabling more stations.
-
-
-## Everyday use
-
-New or replaced files are discovered automatically. The detector page shows the queue,
-failed songs, recent batches, the station's GPU cost this month and the balance of its
-Runpod account. If several stations use that account, it also shows how many and their
-combined cost this month. An identical file that was already analyzed for any
-station is reused without GPU cost.
-
-For logs on the server:
-
-```bash
-cd /opt/azuracast-intro-detector
-sudo docker compose logs --tail 50 detector
-```
-### Intro end
-
-Values are seconds from the **original file start**, not from an AutoCue cue-in:
-
-| Value | Meaning |
-| --- | --- |
-| Blank | Unknown or unresolved; left untouched |
-| `0` | No usable intro; no sweeper |
-| Positive | Measured usable intro end |
-
-Changes made by an operator are not overwritten. See [manual-value protection](docs/ADVANCED.md#manual-value-protection)
-before deliberately unlocking a track.
-
-### Expected cost
-
-Allow roughly **US$2-$6 of GPU compute per 1,000 first-time tracks** with a prepared
-image and batched RTX 4090 processing. This is a planning estimate, not a guaranteed
-price. Small cold batches, image downloads, retries, storage and provider rates can
-increase it. Reusing a stored analysis needs no GPU time.
-
-See [costs and limits](docs/ADVANCED.md#costs-and-limits) for the assumptions and controls.
+Analysis costs roughly USD 2 to 6 per 1,000 new songs; a library of 27,301 songs cost about
+USD 3.90 per 1,000. Each station has its own monthly budget.
 
 ## More documentation
 
-- [Advanced guide](docs/ADVANCED.md): optional configuration, commands,
-  backups, troubleshooting, removal and development.
+- [Advanced guide](docs/ADVANCED.md): requirements, installation and updates, manual
+  installation, configuration, commands, logs, backups, troubleshooting, removal and
+  development.
 - [Models](docs/MODELS.md): detector models and pinned versions.
 - [Third-party licenses](docs/LICENSES.md): notices and image redistribution requirements.
 
