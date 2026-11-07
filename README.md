@@ -60,8 +60,8 @@ keeps its own monthly budget.
   broadcasting permission.
 2. Switch the detector on, enter the Runpod key and a monthly budget, and save. New
   uploads are analyzed automatically from now on and their intros written to AzuraCast.
-3. To analyze songs already in the library, use **Older songs → Show cost…**. It shows
-  the number of songs and an estimated cost before anything is queued.
+3. To analyze songs already in the library, check **Older songs** on the Status tab: it
+  shows the number of songs, the estimated cost and the budget left; **Analyze them** starts.
   **Processing uses paid GPU time** unless an identical file was analyzed before.
 4. Listen to the results in Sweepers' Intro Manager and correct any intro there; a
   corrected value counts as entered by hand and is kept.
