@@ -11,6 +11,7 @@ from . import evidence, publisher
 from .azuracast import AzuraCastError
 from .db import pack, unpack
 from .gpu import BudgetExceeded, GpuError, KeepPodRunning, MissingKey, NoCapacity, PodBusy, WorkerNeedsRecovery
+from .housekeeping import Housekeeping, disk_full
 from .library import sync_station
 from .stations import Instance, Stations
 
@@ -28,6 +29,7 @@ class Service:
         self.clock, self.sleep = clock, sleep
         self.settings = Stations(con, cfg, clock)
         self.instance = Instance(con)
+        self.housekeeping = Housekeeping(con, cfg.data_dir, self.instance, clock)
         self._selector, self._selector_factory = None, selector_factory
         # Per GPU account: no batch before this time after a failed one.
         self.retry_at = {}
@@ -204,6 +206,8 @@ class Service:
 
     def blocked(self, settings):
         """Why the station's songs cannot start a GPU batch now, or None."""
+        if disk_full(self.cfg.data_dir):
+            return 'disk almost full'
         blocked = self.gpus.blocked(settings.id)
         if blocked is None and self.clock() < self.retry_at.get(self.gpus.account(settings.id), 0.):
             return 'waiting for GPU retry'
@@ -251,6 +255,8 @@ class Service:
         return rows, account
 
     def process(self, force=False, force_publish=False):
+        if disk_full(self.cfg.data_dir):
+            return 'disk almost full'
         rows, account = self.ready(force, force_publish)
         if not rows:
             return 'idle'
@@ -261,6 +267,9 @@ class Service:
         self._begin_activity(account, rows)
         try:
             for index, media in enumerate(rows, 1):
+                if disk_full(self.cfg.data_dir):
+                    log.warning('Disk almost full; the remaining %d songs wait', len(rows) - index + 1)
+                    break
                 publish_forced = force_publish or media['station_id'] in forced
                 suffix = PurePosixPath(media['path']).suffix.lower()
                 try:
@@ -367,21 +376,28 @@ class Service:
 
     def run_forever(self, tick=15):
         last_sync = 0.
-        # A batch interrupted by a restart left its progress behind.
+        # A batch interrupted by a restart left its progress and downloads behind.
         self.instance.set_marker(ACTIVITY, None)
+        self.housekeeping.clean_work()
         with self.con:
             self.con.execute("UPDATE runs SET status='interrupted', finished_at=? WHERE status='running'", (self.clock(),))
         while True:
             if self.clock() - last_sync >= self.cfg.poll_seconds:
                 self.sync()
                 last_sync = self.clock()
+            result = None
             try:
                 self.run_jobs()
-                self.tick()
+                result = self.tick()
             except Exception:
                 log.exception('Processing failed')
             try:
                 self.gpus.idle_tick()
             except Exception:
                 log.exception('Idle guard failed')
+            if result in ('idle', 'disk almost full'):
+                try:
+                    self.housekeeping.tick()
+                except Exception:
+                    log.exception('Housekeeping failed')
             self.sleep(tick)

@@ -15,6 +15,7 @@ from . import api, config as config_module
 from .azuracast import AzuraCastError, Client
 from .db import audit, connect
 from .gpu import GpuError, Workers, station_spend
+from .housekeeping import free_bytes
 from .library import backfill
 from .service import Service
 from .stations import Instance, Secrets, Stations, key_slot, migrate
@@ -135,6 +136,9 @@ def cmd_status(args):
     for row in con.execute('SELECT station_id, state, COUNT(*) n FROM publications GROUP BY 1, 2 ORDER BY 1, 2'):
         print(f'station {row["station_id"]:>3}  publication {row["state"]:<10} {row["n"]}')
     print(f'analyses: {con.execute("SELECT COUNT(*) FROM analyses").fetchone()[0]}')
+    page = con.execute('PRAGMA page_size').fetchone()[0]
+    used = con.execute('PRAGMA page_count').fetchone()[0] - con.execute('PRAGMA freelist_count').fetchone()[0]
+    print(f'database: {used * page / 1e9:.2f} GB used, {free_bytes(service.cfg.data_dir) / 1e9:.1f} GB free on disk')
     for row in con.execute('SELECT * FROM runs ORDER BY started_at DESC LIMIT 5'):
         print(f'run {row["id"]} {row["account"]} {row["status"]} songs={row["songs"]} '
               f'{time.strftime("%Y-%m-%d %H:%M", time.gmtime(row["started_at"]))} {row["error"] or ""}'[:300])

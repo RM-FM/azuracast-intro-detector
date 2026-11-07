@@ -64,7 +64,7 @@ class AB(unittest.TestCase):
         self.con.close()
         self.tmp.cleanup()
 
-    def test_stored_language_is_read_without_full_parse(self):
+    def test_stored_language_is_read(self):
         blob = self.con.execute('SELECT report FROM analyses WHERE sha256=?', (sha(4),)).fetchone()[0]
         self.assertEqual(ab.stored_language(blob), 'ko')
 

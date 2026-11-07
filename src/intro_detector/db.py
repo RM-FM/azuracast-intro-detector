@@ -1,8 +1,17 @@
 """SQLite state. One service instance owns the database."""
 import json
+import lzma
 import sqlite3
 import time
 import zlib
+
+import numpy
+
+# Lossless binary evidence; blobs without this prefix are the zlib JSON of earlier releases.
+MAGIC = b'IDE1'
+ARRAY_REF = '$a'
+MIN_ARRAY = 32
+LZMA_PRESET = 6
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS stations(
@@ -119,6 +128,9 @@ CREATE TABLE IF NOT EXISTS station_jobs(
   kind TEXT NOT NULL,
   requested_at REAL NOT NULL,
   PRIMARY KEY(station_id, kind));
+CREATE TABLE IF NOT EXISTS unused(
+  sha256 TEXT PRIMARY KEY,
+  since REAL NOT NULL);
 '''
 # Columns added after the first release; the migration assigns existing rows to the key's account.
 COLUMNS = (('pods', 'account', "TEXT NOT NULL DEFAULT 'shared'"),
@@ -132,6 +144,8 @@ def connect(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=30)
     con.row_factory = sqlite3.Row
+    # Takes effect for a new database; an existing one switches with its first housekeeping rebuild.
+    con.execute('PRAGMA auto_vacuum=INCREMENTAL')
     con.execute('PRAGMA journal_mode=WAL')
     con.execute('PRAGMA busy_timeout=30000')
     con.executescript(SCHEMA)
@@ -143,12 +157,57 @@ def connect(path):
 
 
 def pack(value):
-    return zlib.compress(json.dumps(value, ensure_ascii=False, allow_nan=False,
-                                    separators=(',', ':')).encode())
+    """Lossless binary evidence: number arrays stored once as typed data, the rest as JSON."""
+    arrays, index = [], {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            return {k: walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            if len(node) >= MIN_ARRAY and all(type(x) is float for x in node):
+                data = _encode_array(node)
+                ref = index.setdefault((data.dtype.str, data.tobytes()), len(arrays))
+                if ref == len(arrays):
+                    arrays.append(data)
+                return {ARRAY_REF: ref}
+            return [walk(v) for v in node]
+        return node
+
+    header = json.dumps({'v': walk(value), 'a': [[data.dtype.str, len(data)] for data in arrays]},
+                        ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()
+    # Grouping the n-th bytes of all numbers together lets the compressor find the repetition.
+    body = b''.join(data.view('u1').reshape(-1, data.itemsize).T.tobytes() for data in arrays)
+    payload = len(header).to_bytes(4, 'little') + header + body
+    return MAGIC + lzma.compress(payload, preset=LZMA_PRESET)
 
 
 def unpack(blob):
-    return json.loads(zlib.decompress(blob))
+    if not blob.startswith(MAGIC):
+        return json.loads(zlib.decompress(blob))
+    payload = lzma.decompress(blob[len(MAGIC):])
+    size = int.from_bytes(payload[:4], 'little')
+    header = json.loads(payload[4:4 + size])
+    arrays, offset = [], 4 + size
+    for dtype, count in header['a']:
+        dtype = numpy.dtype(dtype)
+        width = count * dtype.itemsize
+        data = numpy.frombuffer(payload, 'u1', width, offset).reshape(dtype.itemsize, count).T.copy().view(dtype)
+        arrays.append(data.ravel().astype(numpy.float64).tolist())
+        offset += width
+
+    def fill(node):
+        if isinstance(node, dict):
+            return arrays[node[ARRAY_REF]] if node.keys() == {ARRAY_REF} else {k: fill(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [fill(v) for v in node]
+        return node
+    return fill(header['v'])
+
+
+def _encode_array(values):
+    data = numpy.asarray(values, dtype=numpy.float64)
+    single = data.astype('<f4')
+    return single if numpy.array_equal(single.astype(numpy.float64), data) else data.astype('<f8')
 
 
 def audit(con, action, station_id=None, media_id=None, sha256=None, before=None, after=None, detail=None):

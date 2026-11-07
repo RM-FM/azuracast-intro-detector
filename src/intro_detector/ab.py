@@ -14,14 +14,11 @@ import re
 import shutil
 import time
 import uuid
-import zlib
 
 from . import evidence
 from .db import pack, unpack
 
 NAME = re.compile(r'[A-Za-z0-9_-]{1,64}')
-# Language that Whisper detected on the Mel-Band stem: the per-song ASR language of B.
-LANGUAGE = re.compile(rb'"melband/whisper_auto":\{.*?"language":(null|"[^"]*")', re.S)
 CHANGED_SECONDS = 0.5
 
 
@@ -33,11 +30,7 @@ def _paths(data_dir, name):
 
 
 def stored_language(blob):
-    data = zlib.decompress(blob)
-    match = LANGUAGE.search(data)
-    if match:
-        return json.loads(match.group(1))
-    return (json.loads(data)['asr'].get('melband/whisper_auto') or {}).get('language')
+    return (unpack(blob)['asr'].get('melband/whisper_auto') or {}).get('language')
 
 
 def _language_index(con, data_dir, live, log):

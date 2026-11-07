@@ -407,6 +407,24 @@ docker compose exec detector intro-detector review add --kind instrumental --sta
 docker compose exec detector intro-detector review list
 ```
 
+## Disk space
+
+The service keeps its data volume small without operator work:
+
+- Each analysis is stored losslessly in a compact binary format, about 0.1 MB per song.
+  The complete evidence is kept so a new detector version can re-evaluate songs
+  without another GPU run.
+- Evidence that no current or published song uses (the file left every library) is
+  deleted after 24 hours. Reviews are kept.
+- Freed space is returned to the disk automatically. A database from an earlier
+  release is converted once in the background while no songs are analyzed, then
+  rebuilt once when there is enough free space for the rebuild.
+- Interrupted batch downloads are removed at startup.
+- Below 1 GB of free space no song is downloaded or analyzed, and the Intro Detector
+  page shows that analysis is paused. It resumes on its own once space is free.
+
+`intro-detector status` shows the database size and the free disk space.
+
 ## Backups
 
 Keep configuration, `.env`, worker keys and the data volume backed up securely; the
@@ -431,8 +449,8 @@ Do not delete a worker containing reports that have not been recovered.
   are only warnings in `check`; the plugin grants them for enabled stations.
 - **Runpod key rejected:** the key must manage Pods; a read-only key is insufficient.
 - **Station blocked:** the Intro Detector page names the reason: no key, budget
-  reached, a failed batch waiting for its retry, or a stopped worker that needs a
-  decision.
+  reached, a failed batch waiting for its retry, a stopped worker that needs a
+  decision, or less than 1 GB of free disk space.
 - **No scans:** initial sync does not backfill. Check the pending queue, filters and
   the station's automatic processing; manual stations need "Process now".
 - **No GPU capacity:** check allowed GPU types, speed and hourly price cap. Do not
@@ -445,9 +463,10 @@ Do not delete a worker containing reports that have not been recovered.
 - **Stopped worker with uncopied reports:** recover the reports before deleting it.
   Analysis with that key pauses without using up song attempts. Deleting the worker
   on the Intro Detector page (or `pod delete --force --station …`) discards that protection.
-- **Disk full or SQLite error:** stop new processing, free disposable build/test
-  artifacts and retain the data volume. Do not delete the database, WAL or analyses
-  to make an error disappear. Restore from a consistent backup only after diagnosis.
+- **Disk full or SQLite error:** analysis pauses by itself below 1 GB of free space.
+  Free disposable build/test artifacts and retain the data volume. Do not delete the
+  database, WAL or analyses to make an error disappear. Restore from a consistent
+  backup only after diagnosis.
 - **Unexpected cue:** inspect the stored evidence and listen to the original file.
   Do not treat uncertain vocals as proof that an early musical cue is safe.
 
