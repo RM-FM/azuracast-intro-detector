@@ -433,7 +433,7 @@ The service keeps its data volume small without operator work:
   release is converted once in the background while no songs are analyzed, then
   rebuilt once when there is enough free space for the rebuild.
 - Interrupted batch downloads are removed at startup.
-- Below 1 GB of free space no song is downloaded or analyzed, and the Intro Detector
+- Below 500 MB of free space no song is downloaded or analyzed, and the Intro Detector
   page shows that analysis is paused. It resumes on its own once space is free.
 
 `intro-detector status` shows the database size and the free disk space.
@@ -463,7 +463,7 @@ Do not delete a worker containing reports that have not been recovered.
 - **Runpod key rejected:** the key must manage Pods; a read-only key is insufficient.
 - **Station blocked:** the Intro Detector page names the reason: no key, budget
   reached, a failed batch waiting for its retry, a stopped worker that needs a
-  decision, or less than 1 GB of free disk space.
+  decision, or less than 500 MB of free disk space.
 - **No scans:** initial sync does not backfill. Check the pending queue, filters and
   the station's automatic processing; manual stations need "Process now".
 - **No GPU capacity:** check allowed GPU types, speed and hourly price cap. Do not
@@ -476,7 +476,7 @@ Do not delete a worker containing reports that have not been recovered.
 - **Stopped worker with uncopied reports:** recover the reports before deleting it.
   Analysis with that key pauses without using up song attempts. Deleting the worker
   on the Intro Detector page (or `pod delete --force --station …`) discards that protection.
-- **Disk full or SQLite error:** analysis pauses by itself below 1 GB of free space.
+- **Disk full or SQLite error:** analysis pauses by itself below 500 MB of free space.
   Free disposable build/test artifacts and retain the data volume. Do not delete the
   database, WAL or analyses to make an error disappear. Restore from a consistent
   backup only after diagnosis.

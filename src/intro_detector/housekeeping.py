@@ -7,7 +7,7 @@ from .db import MAGIC, pack, unpack
 
 log = logging.getLogger(__name__)
 # Below this much free space no song is downloaded or analyzed.
-RESERVE_BYTES = 1 << 30
+RESERVE_BYTES = 500 << 20
 # Evidence of a song that left every library is kept this long, so a short AzuraCast hiccup costs nothing.
 UNUSED_SECONDS = 24 * 3600
 CONVERT_SECONDS = 20
