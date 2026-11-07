@@ -84,6 +84,24 @@ class FrozenSelector(unittest.TestCase):
             self.assertGreaterEqual(result['cue_s'], result['lead_anchor_s'] - 1.)
             self.assertLessEqual(result['cue_s'], result['lead_anchor_s'])
 
+    def test_matching_stem_phrases_corroborate_two_stem_vocal_anchor(self):
+        from intro_detector.selector import _lead_vocal_anchor, _lead_word_events
+
+        row = helpers.report_row('song.mp3', 'sha')
+        words = [dict(word=word, start_original=start) for word, start in
+                 ((' We', 7.), (' know', 7.3), (' tonight', 7.6), (' baby', 7.9))]
+        for variant in ('demucs', 'melband'):
+            row['asr'][f'{variant}/turbo'] = dict(
+                text='We know tonight baby', words=words,
+                first_word_start=7., quality_flags=[])
+        row['acoustic']['original/4'] = dict(
+            frame_seconds=.1, curves={'vocal': [0.] * 70 + [.1] * 10 + [0.] * 220})
+
+        anchor, support = _lead_vocal_anchor(row, _lead_word_events(row), row)
+
+        self.assertAlmostEqual(anchor, 7.)
+        self.assertEqual(support, 2)
+
     def test_invalid_word_alignment_does_not_create_lead_anchor(self):
         from intro_detector.selector import _lead_word_events
 

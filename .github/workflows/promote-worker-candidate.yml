@@ -1,0 +1,208 @@
+name: Promote reviewed GPU candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag for the reviewed candidate
+        required: true
+        type: string
+      candidate_run_id:
+        description: Successful private candidate workflow run ID
+        required: true
+        type: string
+      reviewed_image_id:
+        description: Exact image ID from the candidate inventory review
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-worker-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    outputs:
+      tag: ${{ steps.push.outputs.tag }}
+      reference: ${{ steps.push.outputs.reference }}
+      digest: ${{ steps.push.outputs.digest }}
+      image_id: ${{ steps.push.outputs.image_id }}
+      source_url: ${{ steps.push.outputs.source_url }}
+      source_sha256: ${{ steps.push.outputs.source_sha256 }}
+    env:
+      IMAGE: ghcr.io/rm-fm/azuracast-intro-detector-gpu
+      CANDIDATE_IMAGE: ghcr.io/rm-fm/azuracast-intro-detector-gpu-candidate
+      TAG: ${{ inputs.tag }}
+      REVIEWED_IMAGE_ID: ${{ inputs.reviewed_image_id }}
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      SOURCE_URL: ${{ format('https://github.com/{0}/releases/download/{1}/corresponding-source.tar.gz', github.repository, inputs.tag) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          path: release-source
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-legal
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: image-legal
+      - name: Validate release, candidate inventory, and worker context
+        id: candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          project_version=$(python3 -c 'import tomllib; print(tomllib.load(open("release-source/pyproject.toml", "rb"))["project"]["version"])')
+          test "${TAG#v}" = "$project_version"
+          release_body=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
+          [[ "$release_body" == *'REDISTRIBUTION REVIEWED: APPROVED'* ]]
+          [[ "$release_body" == *'GPU WORKER IMAGE: UPDATED'* ]]
+          git fetch origin main
+          source_revision=$(git -C release-source rev-parse HEAD)
+          git merge-base --is-ancestor "$source_revision" origin/main
+          image_id=$(python3 -c 'import json; print(json.load(open("image-legal/image.json"))[0]["Id"])')
+          inventory_revision=$(python3 -c 'import json; print(json.load(open("image-legal/image.json"))[0]["Config"]["Labels"]["org.opencontainers.image.revision"])')
+          inventory_version=$(python3 -c 'import json; print(json.load(open("image-legal/image.json"))[0]["Config"]["Labels"]["org.opencontainers.image.version"])')
+          [[ "$REVIEWED_IMAGE_ID" =~ ^sha256:[[:xdigit:]]{64}$ ]]
+          test "$image_id" = "$REVIEWED_IMAGE_ID"
+          test "$inventory_revision" = "$source_revision"
+          test "$inventory_version" = "$TAG"
+          test "$(cat image-legal/CORRESPONDING_SOURCE)" = "$SOURCE_URL"
+          candidate_context_sha=$(cut -d' ' -f1 image-legal/worker-context.sha256)
+          SOURCE_DATE_EPOCH=0 bash release-source/bin/image-context.sh worker worker-context.tar
+          current_context_sha=$(sha256sum worker-context.tar | cut -d' ' -f1)
+          test "$candidate_context_sha" = "$current_context_sha"
+          for inventory in image-legal/inventory/base/python.json image-legal/inventory/stem/python.json image-legal/inventory/qwen/python.json; do
+            jq --exit-status '[.packages[].name | ascii_downcase] | any(. == "diffq" or . == "soynlp") | not' "$inventory"
+          done
+          printf 'source_revision=%s\nimage_id=%s\n' "$source_revision" "$image_id" >> "$GITHUB_OUTPUT"
+      - name: Pull the exact private candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          candidate="$CANDIDATE_IMAGE:$TAG-${{ steps.candidate.outputs.source_revision }}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker pull "$candidate"
+          test "$(docker image inspect "$candidate" --format '{{.Id}}')" = "$REVIEWED_IMAGE_ID"
+          docker tag "$candidate" "$IMAGE:$TAG"
+      - name: Fetch and verify corresponding source
+        id: source
+        run: |
+          mkdir -p source-material/native source-material/debian
+          python3 release-source/gpu/fetch_native_sources.py --output source-material/native
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates debian-archive-keyring dpkg-dev
+          snapshot=$(sed -n 's/^ARG DEBIAN_SNAPSHOT=//p' release-source/gpu/Dockerfile | head -n 1)
+          test -n "$snapshot"
+          python3 release-source/gpu/fetch_debian_sources.py \
+            --inventory image-legal/inventory/base/debian.tsv \
+            --output source-material/debian --snapshot "$snapshot"
+          python3 release-source/gpu/build_source_bundle.py \
+            --inventory image-legal --source-material source-material \
+            --repository release-source --worker-context worker-context.tar \
+            --image-id "$REVIEWED_IMAGE_ID" \
+            --revision "${{ steps.candidate.outputs.source_revision }}" \
+            --output corresponding-source.tar.gz
+          python3 release-source/gpu/image_inventory.py --output image-legal \
+            --source-bundle corresponding-source.tar.gz \
+            --image-id "$REVIEWED_IMAGE_ID" \
+            --revision "${{ steps.candidate.outputs.source_revision }}"
+          source_sha256=$(sha256sum corresponding-source.tar.gz | cut -d' ' -f1)
+          printf 'source_sha256=%s\n' "$source_sha256" >> "$GITHUB_OUTPUT"
+      - name: Attach corresponding source to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" corresponding-source.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+      - name: Push the reviewed image and make the package public
+        id: push
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_VISIBILITY_TOKEN }}
+        run: |
+          if docker manifest inspect "$IMAGE:$TAG" > /dev/null 2> "$RUNNER_TEMP/tag-check.log"; then
+            docker pull "$IMAGE:$TAG"
+            existing_image_id=$(docker image inspect "$IMAGE:$TAG" --format '{{.Id}}')
+            test "$existing_image_id" = "$REVIEWED_IMAGE_ID"
+          else
+            grep -Eiq 'manifest unknown|no such manifest' "$RUNNER_TEMP/tag-check.log"
+            docker push "$IMAGE:$TAG"
+          fi
+          visibility=$(gh api --method PATCH "$GITHUB_API_URL/user/packages/container/azuracast-intro-detector-gpu/visibility" -f visibility=public --jq '.visibility')
+          test "$visibility" = public
+          reference=$(docker image inspect "$IMAGE:$TAG" --format '{{index .RepoDigests 0}}')
+          digest="${reference##*@}"
+          [[ "$digest" =~ ^sha256:[[:xdigit:]]{64}$ ]]
+          printf 'tag=%s\nreference=%s\ndigest=%s\nimage_id=%s\nsource_url=%s\nsource_sha256=%s\n' \
+            "$TAG" "$IMAGE:$TAG" "$digest" "$REVIEWED_IMAGE_ID" "$SOURCE_URL" \
+            "${{ steps.source.outputs.source_sha256 }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-image-evidence-input
+          path: corresponding-source.tar.gz
+
+  public-pull:
+    needs: promote
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      packages: write
+    env:
+      IMAGE: ghcr.io/rm-fm/azuracast-intro-detector-gpu
+      TAG: ${{ needs.promote.outputs.tag }}
+      REFERENCE: ${{ needs.promote.outputs.reference }}
+      DIGEST: ${{ needs.promote.outputs.digest }}
+      IMAGE_ID: ${{ needs.promote.outputs.image_id }}
+      SOURCE_URL: ${{ needs.promote.outputs.source_url }}
+      SOURCE_SHA256: ${{ needs.promote.outputs.source_sha256 }}
+    steps:
+      - name: Verify anonymous pull by tag and digest
+        run: |
+          public_config=$(mktemp -d)
+          trap 'rm -rf "$public_config"' EXIT
+          docker --config "$public_config" manifest inspect "$REFERENCE" > manifest.json
+          docker --config "$public_config" pull "$REFERENCE"
+          test "$(docker image inspect "$REFERENCE" --format '{{.Id}}')" = "$IMAGE_ID"
+          docker image inspect "$REFERENCE" --format '{{json .RepoDigests}}' | grep -F "$IMAGE@$DIGEST"
+          docker --config "$public_config" pull "$IMAGE@$DIGEST"
+          curl --fail --location --proto '=https' --proto-redir '=https' --output source.tar "$SOURCE_URL"
+          printf '%s  source.tar\n' "$SOURCE_SHA256" | sha256sum --check -
+      - name: Promote the verified image to v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag "$REFERENCE" "$IMAGE:v1"
+          docker push "$IMAGE:v1"
+          public_config=$(mktemp -d)
+          trap 'rm -rf "$public_config"' EXIT
+          docker --config "$public_config" manifest inspect "$IMAGE:v1" >/dev/null
+          docker --config "$public_config" pull "$IMAGE:v1"
+          docker image inspect "$IMAGE:v1" --format '{{json .RepoDigests}}' | grep -F "$IMAGE@$DIGEST"
+      - name: Attach image evidence to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf 'Image: %s\n\nDigest: %s\n\nSource: %s\n\nSource SHA256: %s\n' \
+            "$REFERENCE" "$DIGEST" "$SOURCE_URL" "$SOURCE_SHA256" > release-evidence.md
+          gh release upload "$TAG" release-evidence.md --clobber --repo "$GITHUB_REPOSITORY"
+          cat release-evidence.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-image-evidence
+          path: |
+            release-evidence.md
+            manifest.json
