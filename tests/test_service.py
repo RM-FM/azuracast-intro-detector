@@ -31,7 +31,7 @@ class FakeGpu(FakeWorkers):
         self.batches.append(files)
         if progress:
             progress('worker')
-            progress('analyze', 1, 2)
+            progress('analyze', 1, 2, detail={'phase': 'run', 'stages': ['qwen']})
             self.during = self.observe() if hasattr(self, 'observe') else None
         if self.error:
             raise self.error
@@ -325,7 +325,7 @@ class Progress(QueueCase):
         self.assertEqual((own['own'], own['step'], own['done'], own['total'], own['station_songs']),
                          (True, 'analyze', 1, 2, 1))
         self.assertEqual(other, {'step': 'analyze', 'done': 1, 'total': 2, 'started_at': self.clock(),
-                                 'step_started_at': self.clock(), 'own': False})
+                                 'step_started_at': self.clock(), 'detail': {'phase': 'run', 'stages': ['qwen']}, 'own': False})
         self.assertIsNone(service.activity(), 'Progress ends with the batch')
         self.assertIsNone(status.activity(service, 1))
 

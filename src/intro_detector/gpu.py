@@ -168,6 +168,10 @@ def station_spend(con, station_id, now):
     return total
 
 
+def _no_progress(step, done=0, total=0, **values):
+    return None
+
+
 class Runpod:
     def __init__(self, settings, con, data_dir, call=None, sleep=time.sleep, clock=time.time,
                  account='default', api_key=None):
@@ -178,6 +182,7 @@ class Runpod:
         self.data_dir = Path(data_dir)
         self.key = Path(settings.ssh_key)
         self.last_pod_id = None
+        self.progress = _no_progress
 
     @property
     def lock_path(self):
@@ -240,6 +245,7 @@ class Runpod:
                         self.con.execute('INSERT INTO pods(pod_id, price, created_at, account) VALUES(?,?,?,?)',
                                          (pod['id'], self.cfg.max_price_per_hour, self.clock(), self.account))
                 log.info('Reusing running worker %s', pod['id'])
+                self.progress('worker', detail=dict(phase='reuse'))
                 return pod['id']
             if pod.get('desiredStatus') == 'EXITED' and row is not None and row['copied']:
                 self.retire(pod['id'], delete=True)
@@ -250,6 +256,7 @@ class Runpod:
         if budget and self.spend() >= budget:
             raise BudgetExceeded(f'Estimated GPU spend this month reached {budget:.2f} USD; no Pod created')
         deadline = self.clock() + self.cfg.wait_minutes * 60
+        attempt = 1
         while True:
             try:
                 catalog = self._json(['runpodctl', 'gpu', 'list', '--include-unavailable'])
@@ -260,6 +267,9 @@ class Runpod:
                 if self.clock() + self.cfg.retry_seconds > deadline:
                     raise
                 log.info('No GPU at the capped price; retrying in %ss', self.cfg.retry_seconds)
+                attempt += 1
+                self.progress('worker', detail=dict(phase='no_stock', attempt=attempt,
+                                                    max_price=self.cfg.max_price_per_hour))
                 self.sleep(self.cfg.retry_seconds)
 
     def _public_key(self):
@@ -281,6 +291,7 @@ class Runpod:
                        '--container-disk-in-gb', str(self.cfg.container_disk_gb),
                        '--data-center-ids', dc, '--ports', '22/tcp', '--env', env, '--ssh']
             log.info('Trying %s in %s at %.2f USD/hour (estimated batch cost %.2f USD)', gpu_id, dc, price, cost)
+            self.progress('worker', detail=dict(phase='search', gpu=gpu_id, location=dc, price=price))
             reply = self.call(command, check=False)
             if reply.returncode:
                 message = reply.stderr.strip() or reply.stdout.strip()
@@ -298,6 +309,7 @@ class Runpod:
                 self.con.execute('INSERT OR REPLACE INTO pods(pod_id, gpu_id, gpu_memory_gb, price, created_at, account) '
                                  'VALUES(?,?,?,?,?,?)', (pod_id, gpu_id, memory, price, self.clock(), self.account))
             log.info('Created worker %s: %s in %s', pod_id, gpu_id, dc)
+            self.progress('worker', detail=dict(phase='boot', gpu=gpu_id, location=dc, price=price))
             return pod_id
         raise NoCapacity('No GPU location accepted a Pod within the price limit; no Pod created')
 
@@ -344,7 +356,7 @@ class Runpod:
 
         progress(step, done, total) is called when the batch reaches a new step or analyzes more chunks.
         """
-        progress = progress or (lambda step, done=0, total=0: None)
+        progress = self.progress = progress or _no_progress
         output_dir = Path(output_dir)
         lock_path = self.lock_path
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -368,7 +380,8 @@ class Runpod:
         row = self._row(pod_id)
         lanes, chunk = lane_plan(self.cfg, songs, row['gpu_memory_gb'] if row else None)
         destination = f'root@{host}:'
-        progress('upload')
+        size = sum(p.stat().st_size for p in songs_dir.iterdir() if p.is_file())
+        progress('upload', detail=dict(songs=songs, megabytes=round(size / 1e6)))
         self._ssh(pod_id, host, port, f'mkdir -p {POD_DIR} {QUEUE} {EVIDENCE}/qwen')
         self._rsync(pod_id, port, '--exclude=__pycache__', str(POD_SOURCE / 'tools'), str(POD_SOURCE / 'experiments'),
                     str(LANES_SOURCE / 'run-lanes.sh'), str(LANES_SOURCE / 'lanes_status.py'), destination + POD_DIR + '/')
@@ -380,7 +393,8 @@ class Runpod:
         self._ssh(pod_id, host, port, f'nohup bash {POD_DIR}/run-lanes.sh {run_id} {lanes} {chunk} '
                                       f'{self.cfg.stagger_seconds} </dev/null >/dev/null 2>&1 &')
         log.info('Batch %s running on %s: %d songs, %d lanes, chunks of %d', run_id, pod_id, songs, lanes, chunk)
-        progress('analyze', 0, math.ceil(songs / chunk))
+        parts = math.ceil(songs / chunk)
+        progress('analyze', 0, parts, detail=dict(phase='prepare', lanes=lanes))
         status, end, last = None, self.clock() + self.cfg.max_run_minutes * 60, None
         while self.clock() < end:
             self.sleep(self.cfg.poll_seconds)
@@ -391,10 +405,15 @@ class Runpod:
                 log.warning('Status temporarily unavailable: %s', error)
                 continue
             summary = f'{status["done"]}/{status["total"]} chunks done, {status["failed"]} failed'
-            if summary != last:
+            if summary != (last or {}).get('summary'):
                 log.info('Pod: %s', summary)
-                progress('analyze', status['done'], status['total'])
-                last = summary
+            stages = sorted({lane['stage'] for lane in status.get('lanes') or [] if lane.get('stage')})
+            detail = dict(phase='run' if status.get('total') else 'prepare', lanes=lanes, stages=stages,
+                          failed=status['failed'])
+            update = dict(summary=summary, done=status.get('progress', status['done']), detail=detail)
+            if update != last:
+                progress('analyze', update['done'], status['total'] or parts, detail=detail)
+                last = update
             if status['exit'] is not None:
                 break
         progress('copy')

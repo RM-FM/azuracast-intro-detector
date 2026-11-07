@@ -56,7 +56,7 @@ def activity(service, station_id):
     current = service.activity()
     if not current:
         return None
-    view = {key: current.get(key) for key in ('step', 'done', 'total', 'started_at', 'step_started_at')}
+    view = {key: current.get(key) for key in ('step', 'done', 'total', 'started_at', 'step_started_at', 'detail')}
     songs = (current.get('stations') or {}).get(str(station_id))
     if songs:
         return dict(view, own=True, songs=current.get('songs'), station_songs=songs)

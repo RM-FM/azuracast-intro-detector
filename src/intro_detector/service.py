@@ -151,7 +151,8 @@ class Service:
             return
         if current.get('step') != step:
             current['step_started_at'] = self.clock()
-        current.update(values, step=step, done=done, total=total)
+        # What the step is doing right now, e.g. the GPU tried or the pipeline stage; replaced by every update.
+        current.update(values, step=step, done=done, total=total, detail=values.get('detail'))
         self.instance.set_marker(ACTIVITY, current)
 
     def queue_job(self, station_id, kind):

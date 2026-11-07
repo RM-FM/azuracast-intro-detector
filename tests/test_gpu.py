@@ -1,3 +1,4 @@
+import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,7 +121,11 @@ class Lifecycle(unittest.TestCase):
 
     def test_creates_cheapest_option_without_workspace_volume(self):
         fake = Fake()
-        self.assertEqual(self.runpod(fake, gpus=MIXED).ensure_worker(songs=100), 'newpod1')
+        runpod, steps = self.runpod(fake, gpus=MIXED), []
+        runpod.progress = lambda step, done=0, total=0, **values: steps.append((step, values['detail']))
+        self.assertEqual(runpod.ensure_worker(songs=100), 'newpod1')
+        detail = dict(gpu='NVIDIA RTX A5000', location='US-KS-2', price=.27)
+        self.assertEqual(steps, [('worker', dict(phase='search', **detail)), ('worker', dict(phase='boot', **detail))])
         create = next(c for c in fake.commands if c[:3] == ['runpodctl', 'pod', 'create'])
         self.assertEqual(create[create.index('--gpu-id') + 1], 'NVIDIA RTX A5000')
         self.assertEqual(create[create.index('--container-disk-in-gb') + 1], '80')
@@ -172,6 +177,33 @@ class Lifecycle(unittest.TestCase):
                              ('abc', .89, stopped - 3600, stopped))
         self.runpod(fake).retire('abc', delete=True)
         self.assertEqual(self.con.execute("SELECT ended_at FROM pods WHERE pod_id='abc'").fetchone()[0], stopped)
+
+
+class LaneStatus(unittest.TestCase):
+    def test_reports_running_stages_and_partial_progress(self):
+        spec = importlib.util.spec_from_file_location('lanes_status', Path(__file__).resolve().parents[1] / 'gpu' / 'lanes_status.py')
+        lanes_status = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lanes_status)
+        with tempdir() as tmp:
+            work, lanes = Path(tmp) / 'work', Path(tmp) / 'lanes'
+            (work / 'results' / '0000').mkdir(parents=True)
+            (work / 'results' / '0000' / 'exit').write_text('lane=0 exit=0')
+            (work / 'total').write_text('3')
+
+            def lane(number, chunk, stages, run_id='r1', state='running'):
+                path = lanes / str(number) / 'experiments' / 'whisper-evidence' / 'ultimate'
+                path.mkdir(parents=True)
+                (path / 'run.json').write_text(json.dumps(dict(
+                    launcher_run_id=f'{run_id}-{chunk}', status=state, total_stages=8,
+                    stages=[dict(stage=name, status=status) for name, status in stages])))
+
+            lane(0, '0000', [('evaluate', 'complete')], state='complete')
+            lane(1, '0001', [('demucs-melband-whisper', 'complete'), ('matrix', 'complete'), ('qwen', 'running')])
+            lane(2, '0002', [('matrix', 'running')], run_id='old')
+            status = lanes_status.summary(str(work), str(lanes), str(work / 'missing.exit'), 'r1')
+        self.assertEqual((status['total'], status['done'], status['failed'], status['exit']), (3, 1, 0, None))
+        self.assertEqual(status['progress'], 1.25, 'A lane two of eight stages into its part adds a quarter')
+        self.assertEqual(status['lanes'], [dict(chunk='0001', finished=2, stages=8, stage='qwen')])
 
 
 class Accounts(unittest.TestCase):
