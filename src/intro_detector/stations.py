@@ -20,8 +20,13 @@ def key_slot(station_id):
 
 
 def key_account(key):
-    """Stations with the same Runpod key share one GPU worker; the account is named after the key's hash."""
+    """Account of a key until Runpod reports its account; named after the key's hash."""
     return 'runpod-' + hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+def runpod_account(user_id):
+    """Account of every key of one Runpod user; named after the hashed user ID."""
+    return 'runpod-' + hashlib.sha256(f'user:{user_id}'.encode()).hexdigest()[:12]
 
 
 def _bool(name, value):

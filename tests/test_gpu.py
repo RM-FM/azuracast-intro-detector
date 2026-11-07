@@ -9,7 +9,7 @@ from helpers import Clock, database, make_config, tempdir
 from intro_detector.config import Runpod as Settings
 from intro_detector.gpu import (GpuError, MissingKey, NoCapacity, Runpod, Workers, account_spend, lane_plan,
                                 merge_chunks, month_spend, no_stock, rank, station_spend)
-from intro_detector.stations import Instance, Secrets, Stations, key_account, key_slot
+from intro_detector.stations import Instance, Secrets, Stations, key_account, key_slot, runpod_account
 
 MIXED = (('NVIDIA GeForce RTX 4090', 1.0), ('NVIDIA RTX A5000', .5), ('NVIDIA RTX A4000', .35), ('NVIDIA L40S', .9))
 CATALOG = [{'gpuId': 'NVIDIA GeForce RTX 4090', 'secureCloud': True, 'securePricePerHr': .89, 'memoryInGb': 24,
@@ -34,6 +34,7 @@ class Fake:
     def __init__(self, pods=()):
         self.pods = list(pods)
         self.commands = []
+        self.user_id = 'user-1'
 
     def __call__(self, command, check=True):
         self.commands.append(command)
@@ -48,7 +49,7 @@ class Fake:
             out = json.dumps({'id': 'newpod1'})
             self.pods = [{'id': 'newpod1', 'name': 'azuracast-intro-detector', 'desiredStatus': 'RUNNING'}]
         elif command[:2] == ['runpodctl', 'user']:
-            out = json.dumps({'clientBalance': 12.3456, 'spendLimit': 80})
+            out = json.dumps({'id': self.user_id, 'clientBalance': 12.3456, 'spendLimit': 80})
         elif command[:1] == ['ssh-keygen']:
             out = 'ssh-ed25519 AAAA test'
         elif command[:3] == ['runpodctl', 'pod', 'delete'] or command[:3] == ['runpodctl', 'pod', 'stop']:
@@ -239,6 +240,40 @@ class Accounts(unittest.TestCase):
         self.secrets.set(key_slot(5), None)
         with self.assertRaises(MissingKey):
             self.workers.get(account)
+
+    def test_keys_of_one_runpod_account_share_its_worker(self):
+        self.secrets.set(key_slot(1), 'rpa_FIRSTKEY123456')
+        self.secrets.set(key_slot(2), 'rpa_SECONDKEY12345')
+        old = self.workers.account(1)
+        self.instance.set_marker('worker_names', {old: 'azuracast-intro-detector'})
+        with self.con:
+            self.con.execute('INSERT INTO pods(pod_id, price, created_at, ended_at, account) VALUES(?,?,?,?,?)',
+                             ('p', 1., self.clock() - 60, self.clock(), old))
+        self.assertEqual(len(self.workers.accounts()), 2, 'Keys count separately until Runpod names the account')
+        self.workers.idle_tick()
+        account = runpod_account('user-1')
+        self.assertEqual((self.workers.account(1), self.workers.account(2), self.workers.accounts()),
+                         (account, account, {account}))
+        self.assertEqual(self.workers.key_stations(account), 2)
+        self.assertEqual(self.workers.worker_name(account), 'azuracast-intro-detector', 'The worker keeps its name')
+        self.assertEqual(self.con.execute('SELECT account FROM pods').fetchone()[0], account)
+        self.assertEqual(self.workers.get(account).account, account)
+
+    def test_a_running_worker_keeps_its_account_until_retired(self):
+        self.secrets.set(key_slot(1), 'rpa_FIRSTKEY123456')
+        old = self.workers.account(1)
+        with self.con:
+            self.con.execute('INSERT INTO pods(pod_id, price, created_at, account) VALUES(?,?,?,?)',
+                             ('p', 1., self.clock(), old))
+        self.assertFalse(self.workers.resolve('rpa_FIRSTKEY123456'))
+        self.assertEqual(self.workers.account(1), old)
+        with self.con:
+            self.con.execute('UPDATE pods SET ended_at=?', (self.clock(),))
+        self.workers.resolve_keys()
+        self.assertEqual(self.workers.account(1), old, 'Asked again only after a while')
+        self.clock.now += 600
+        self.workers.resolve_keys()
+        self.assertEqual(self.workers.account(1), runpod_account('user-1'))
 
     def test_migrated_workers_keep_their_runpod_name(self):
         self.secrets.set(key_slot(1), 'rpa_STATIONKEY1234')

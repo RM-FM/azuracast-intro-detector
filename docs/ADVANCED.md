@@ -154,8 +154,8 @@ are recorded but not automatically reanalyzed. `backfill` queues existing blank 
 at lower priority. "Process now" (`process --station`) skips the quiet period for one
 station, also when automatic processing is off.
 
-A batch contains the songs of stations with the same Runpod key. Songs of a station
-without key, with an exhausted budget or after a failed batch on its key wait; they are
+A batch contains the songs of stations on the same Runpod account. Songs of a station
+without key, with an exhausted budget or after a failed batch on its account wait; they are
 downloaded once to learn their audio hash, so an analysis stored for another station
 is still reused.
 
@@ -198,10 +198,13 @@ recorded that way once for every enabled station.
 ## Runpod keys and the management API
 
 Every station enters a Runpod key and a monthly budget. Several stations may enter the
-same key or each use its own. Stations with the same key share one worker
-(`azuracast-intro-detector-` and eight characters of the key's hash), lock and
-balance; each worker's cost is split between its stations by analyzed songs, and each
-station's share counts against its own budget. Keys are checked with Runpod before they
+same key or each use its own. Stations whose keys belong to the same Runpod account
+(Runpod reports the account of a key when it is saved, otherwise within ten minutes)
+share one worker (`azuracast-intro-detector-` and eight characters of the hashed
+account ID), lock and balance. Each worker's cost, including its start and idle time,
+is split between its stations by analyzed songs, and each station's share counts
+against its own budget. A worker that is running when its key's account becomes known
+keeps its records until it is retired. Keys are checked with Runpod before they
 are stored in `secrets.json` (mode 600) in the data volume and reach `runpodctl` only
 through its environment. A station cannot remove or replace a key while a worker runs
 on it and no other station uses that key.

@@ -51,8 +51,8 @@ For installation without the plugin's setup, see [manual installation](docs/ADVA
 4. Keep the key in a password manager; it is entered only on the detector page.
 
 Use one key for several stations or a separate key per station, whichever suits how
-you pay for them. Stations with the same key share one GPU worker; each station
-keeps its own monthly budget.
+you pay for them. Stations whose keys belong to the same Runpod account share one GPU
+worker; each station keeps its own monthly budget.
 
 #### Enable the station
 
@@ -71,8 +71,8 @@ keeps its own monthly budget.
 ## Everyday use
 
 New or replaced files are discovered automatically. The detector page shows the queue,
-failed songs, recent batches, the station's GPU cost this month and the Runpod balance
-of its key. If several stations use the same key, it also shows how many and their
+failed songs, recent batches, the station's GPU cost this month and the balance of its
+Runpod account. If several stations use that account, it also shows how many and their
 combined cost this month. An identical file that was already analyzed for any
 station is reused without GPU cost.
 

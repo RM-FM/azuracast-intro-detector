@@ -20,7 +20,7 @@ import subprocess
 import time
 import uuid
 
-from .stations import key_account, key_slot
+from .stations import key_account, key_slot, runpod_account
 
 log = logging.getLogger(__name__)
 
@@ -474,27 +474,76 @@ class Runpod:
 
 
 BALANCE_SECONDS = 600
+# A key whose Runpod account could not be determined is asked again after this long.
+RESOLVE_SECONDS = 600
 
 
 class Workers:
-    """One Runpod worker per Runpod key; stations that enter the same key share its worker."""
+    """One Runpod worker per Runpod account; stations whose keys belong to the same account share it.
+
+    A key counts as its own account until Runpod has reported which account it belongs to.
+    """
 
     def __init__(self, cfg, con, stations, instance, secrets, call=None, sleep=time.sleep, clock=time.time):
         self.cfg, self.con, self.stations, self.instance, self.secrets = cfg, con, stations, instance, secrets
         self.call, self.sleep, self.clock = call, sleep, clock
-        self._workers, self._checked = {}, {}
+        self._workers, self._checked, self._resolved = {}, {}, {}
+
+    def account_of_key(self, key):
+        return (self.instance.marker('key_accounts') or {}).get(key_account(key), key_account(key))
 
     def account(self, station_id):
         """The GPU account a station's songs run on, or None without a Runpod key."""
         key = self.secrets.get(key_slot(station_id))
-        return key_account(key) if key else None
+        return self.account_of_key(key) if key else None
 
     def accounts(self):
-        return {key_account(key) for key in self.secrets.keys()}
+        return {self.account_of_key(key) for key in self.secrets.keys()}
 
     def key_stations(self, account):
-        """Number of stations that entered the key of this account."""
-        return sum(1 for slot in self.secrets.slots() if key_account(self.secrets.get(slot)) == account)
+        """Number of stations whose key belongs to this account."""
+        return sum(1 for slot in self.secrets.slots() if self.account_of_key(self.secrets.get(slot)) == account)
+
+    def resolve(self, key):
+        """Group the key with other keys of the same Runpod account; True once it is grouped."""
+        mapping = self.instance.marker('key_accounts') or {}
+        if key_account(key) in mapping:
+            return True
+        self._resolved[key_account(key)] = self.clock()
+        call = self.call or functools.partial(run_command, env={**os.environ, 'RUNPOD_API_KEY': key})
+        try:
+            user = json.loads(call(['runpodctl', 'user']).stdout)
+            account = runpod_account(user['id'])
+        except (GpuError, ValueError, KeyError, TypeError) as error:
+            log.warning('Runpod account of a key unavailable: %s', error)
+            return False
+        old = key_account(key)
+        # Records of a running worker keep their account until it is retired, so it is never orphaned.
+        if self.con.execute('SELECT 1 FROM pods WHERE account=? AND ended_at IS NULL', (old,)).fetchone():
+            return False
+        names = self.instance.marker('worker_names') or {}
+        if old in names:
+            names.setdefault(account, names.pop(old))
+            self.instance.set_marker('worker_names', names)
+        for name in ('recovery', 'balance'):
+            value = self.instance.marker(f'{name}:{old}')
+            if value is not None:
+                self.instance.set_marker(f'{name}:{account}', value)
+                self.instance.set_marker(f'{name}:{old}', None)
+        with self.con:
+            for table in ('pods', 'runs'):
+                self.con.execute(f'UPDATE {table} SET account=? WHERE account=?', (account, old))
+        self.instance.set_marker('key_accounts', {**mapping, old: account})
+        self._workers.pop(old, None)
+        return True
+
+    def resolve_keys(self):
+        """Ask Runpod for the account of keys not grouped yet, at most every RESOLVE_SECONDS per key."""
+        mapping = self.instance.marker('key_accounts') or {}
+        for key in self.secrets.keys():
+            asked = self._resolved.get(key_account(key), -math.inf)
+            if key_account(key) not in mapping and self.clock() - asked >= RESOLVE_SECONDS:
+                self.resolve(key)
 
     def balance(self, account, refresh=False):
         """Prepaid Runpod balance of the key's account, checked at most every BALANCE_SECONDS."""
@@ -519,7 +568,7 @@ class Workers:
         return dataclasses.replace(self.cfg.runpod, monthly_budget_usd=0., worker_name=self.worker_name(account))
 
     def get(self, account):
-        key = next((k for k in self.secrets.keys() if key_account(k) == account), None)
+        key = next((k for k in self.secrets.keys() if self.account_of_key(k) == account), None)
         if key is None:
             raise MissingKey('No station holds the Runpod key of this worker any more')
         worker = self._workers.get(account)
@@ -548,6 +597,7 @@ class Workers:
 
     def idle_tick(self):
         """Retire idle workers; accounts without an open worker are checked once per poll interval."""
+        self.resolve_keys()
         now, open_accounts = self.clock(), self.open_accounts()
         for account in sorted(self.accounts() | open_accounts):
             if account not in open_accounts and now - self._checked.get(account, -math.inf) < self.cfg.poll_seconds:

@@ -8,10 +8,11 @@ from intro_detector.api import Api, serve
 from intro_detector.gpu import Workers
 from intro_detector.library import sync_station
 from intro_detector.service import Service
-from intro_detector.stations import Instance, Secrets, Stations, key_account
+from intro_detector.stations import Instance, Secrets, Stations, runpod_account
 from test_gpu import Fake
 
 TOKEN = 't' * 40
+ACCOUNT = runpod_account('user-1')
 KEY = 'rpa_VALIDKEY12345678'
 
 
@@ -72,7 +73,7 @@ class ApiTests(unittest.TestCase):
         con = database(self.tmp.name)
         with con:
             con.execute('INSERT INTO pods(pod_id, price, created_at, ended_at, account) VALUES(?,?,?,?,?)',
-                        ('p', 2., self.clock() - 3600, self.clock(), key_account(KEY)))
+                        ('p', 2., self.clock() - 3600, self.clock(), ACCOUNT))
             con.execute("INSERT INTO runs(id, pod_id, songs, status, started_at) VALUES('r', 'p', 4, 'complete', 0)")
             con.executemany("INSERT INTO run_stations VALUES('r', ?, ?)", [(3, 3), (4, 1)])
         con.close()
@@ -90,10 +91,12 @@ class ApiTests(unittest.TestCase):
         con = database(self.tmp.name)
         with con:
             con.execute('INSERT INTO pods(pod_id, price, created_at, account) VALUES(?,?,?,?)',
-                        ('p', .89, self.clock(), key_account(KEY)))
+                        ('p', .89, self.clock(), ACCOUNT))
         self.assertEqual(self.call('DELETE', '/api/v1/stations/3/key')[0], 409)
         self.accepted.add('rpa_OTHERKEY1234567')
+        self.fake.user_id = 'user-2'
         self.assertEqual(self.call('PUT', '/api/v1/stations/3/key', {'key': 'rpa_OTHERKEY1234567'})[0], 409)
+        self.fake.user_id = 'user-1'
         self.call('PUT', '/api/v1/stations/4/key', {'key': KEY})
         self.assertIsNone(self.call('DELETE', '/api/v1/stations/3/key')[1]['key'])
         self.assertEqual(self.call('DELETE', '/api/v1/stations/4/key')[0], 409)
@@ -120,10 +123,10 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call('POST', '/api/v1/stations/3/worker/retire')[0], 409)
         self.call('PUT', '/api/v1/stations/3/key', {'key': KEY})
         self.assertEqual(self.call('POST', '/api/v1/stations/3/worker/retire')[1], {'worker': None})
-        name = 'azuracast-intro-detector-' + key_account(KEY)[7:15]
+        name = 'azuracast-intro-detector-' + ACCOUNT[7:15]
         self.fake.pods = [{'id': 'abc', 'name': name, 'desiredStatus': 'EXITED'}]
         service = self.open()
-        service.instance.set_marker(f'recovery:{key_account(KEY)}', 'stopped with unconfirmed evidence')
+        service.instance.set_marker(f'recovery:{ACCOUNT}', 'stopped with unconfirmed evidence')
         service.con.close()
         self.assertEqual(self.call('GET', '/api/v1/stations/3')[1]['recovery'], 'stopped with unconfirmed evidence')
         self.assertEqual(self.call('POST', '/api/v1/stations/3/worker/retire')[0], 409)

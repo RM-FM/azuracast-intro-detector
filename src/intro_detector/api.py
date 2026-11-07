@@ -14,7 +14,7 @@ import threading
 from . import status
 from .gpu import GpuError, run_command
 from .library import backfill
-from .stations import key_account, key_slot, valid_key
+from .stations import key_slot, valid_key
 
 log = logging.getLogger(__name__)
 API_VERSION = 1
@@ -107,10 +107,12 @@ class Api:
         key = valid_key(data.get('key'))
         if not self.key_works(key):
             raise ApiError(422, 'Runpod rejected this API key; check that it may manage Pods')
-        self._release(service, station_id, key_account(key))
+        service.gpus.resolve(key)
+        account = service.gpus.account_of_key(key)
+        self._release(service, station_id, account)
         service.gpus.secrets.set(key_slot(station_id), key)
         log.info('Runpod key stored for station %s', station_id)
-        service.gpus.balance(key_account(key), refresh=True)
+        service.gpus.balance(account, refresh=True)
 
         return status.station(service, station_id)
 
