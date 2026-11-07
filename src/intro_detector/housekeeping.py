@@ -102,7 +102,8 @@ class Housekeeping:
         if free * page < SHRINK_BYTES:
             return False
         if self.con.execute('PRAGMA auto_vacuum').fetchone()[0] == INCREMENTAL:
-            self.con.execute('PRAGMA incremental_vacuum').fetchall()
+            # executescript steps the pragma to completion; a plain execute stops after one page on Python 3.11.
+            self.con.executescript('PRAGMA incremental_vacuum;')
             self.con.execute('PRAGMA wal_checkpoint(TRUNCATE)')
             return True
         # The rebuild writes the used pages twice (copy and WAL) before the old file is released.
