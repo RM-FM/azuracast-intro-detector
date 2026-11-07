@@ -3,12 +3,15 @@ set +x
 set -euo pipefail
 umask 077
 
+usage='Usage: sudo bash bin/setup.sh [--azuracast-dir DIR] [--unattended]'
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 image=azuracast-intro-detector:local
 log=$(mktemp "${TMPDIR:-/tmp}/intro-detector-setup.XXXXXX.log")
 backup=""
 registry_config=""
 build_context=""
+azuracast_dir=""
+unattended=false
 exec 3>&1 4>&2
 exec >> "$log" 2>&1
 status() { printf "$@" >&3; }
@@ -28,14 +31,27 @@ cleanup() {
 trap on_error ERR
 trap cleanup EXIT
 
-[[ $# == 0 ]] || fail 'Usage: sudo bash bin/setup.sh'
+while (($#)); do
+    case "$1" in
+        --azuracast-dir) [[ $# -ge 2 ]] || fail "$usage"; azuracast_dir=$2; shift 2 ;;
+        --unattended) unattended=true; shift ;;
+        *) fail "$usage" ;;
+    esac
+done
 [[ "$EUID" == 0 ]] || fail 'Run this script with sudo, or from a root shell.'
 [[ -z "${COMPOSE_FILE:-}" ]] || fail 'Custom COMPOSE_FILE requires manual installation.'
-for path in .env config.toml config.example.toml secrets secrets/runpod-ssh-key secrets/runpod-ssh-key.pub .setup-backups; do
+for path in .env config.toml config.example.toml compose.override.yaml secrets secrets/runpod-ssh-key \
+    secrets/runpod-ssh-key.pub .setup-backups; do
     [[ ! -L "$root/$path" ]] || fail "Refusing a symlinked setup path: $path"
 done
 if [[ -f "$root/.env" ]] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?COMPOSE_FILE[[:space:]]*=' "$root/.env"; then
     fail 'COMPOSE_FILE in .env requires manual installation.'
+fi
+plugin_dir=""
+if [[ -n "$azuracast_dir" ]]; then
+    azuracast_dir=$(cd "$azuracast_dir" && pwd -P) || fail "AzuraCast directory not found: $azuracast_dir"
+    plugin_dir="$azuracast_dir/plugins/azuracast-sweepers"
+    [[ -d "$plugin_dir" && ! -L "$plugin_dir/.detector.json" ]] || fail 'Install the Sweepers plugin first.'
 fi
 command -v docker >/dev/null || fail 'Install Docker Engine and Docker Compose first.'
 docker info >/dev/null
@@ -48,6 +64,7 @@ if ((available < 5242880)); then status 'WARNING: Less than 5 GB free; make spac
 status 'Building the detector service. This does not start a GPU worker...\n'
 build_context=$(mktemp "${TMPDIR:-/tmp}/intro-detector-context.XXXXXX.tar")
 bash bin/image-context.sh service "$build_context"
+old_image=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)
 docker build --tag "$image" - < "$build_context"
 rm -f -- "$build_context"
 build_context=""
@@ -67,32 +84,46 @@ metadata=$(docker run --rm --user 0:0 --network none --entrypoint python \
     -v "$root:/setup" "$image" -m intro_detector.setup_config inspect)
 mapfile -t settings <<< "$metadata"
 [[ ${#settings[@]} == 3 ]] || fail 'Could not read the existing settings.'
-configure=true
-if [[ -f config.toml && "${settings[1]}" == 1 && "${settings[2]}" == 1 ]]; then
-    status 'Keep existing host, API keys and all configuration? [Y/n] '
-    read -r answer || fail 'Interactive confirmation is required.'
-    if [[ "$answer" != n && "$answer" != N && "$answer" != no ]]; then configure=false; fi
+url="" azura_key=""
+if $unattended; then
+    # Plugin setup passes the AzuraCast address and API key, one per line; empty lines keep existing values.
+    IFS= read -r url || true
+    IFS= read -r azura_key || true
+    configure=false
+    if [[ ! -f config.toml || "${settings[1]}" != 1 || -n "$url" || -n "$azura_key" ]]; then configure=true; fi
+    url="${url:-${settings[0]}}"
+else
+    configure=true
+    if [[ -f config.toml && "${settings[1]}" == 1 ]]; then
+        status 'Keep existing AzuraCast address, API key and all configuration? [Y/n] '
+        read -r answer || fail 'Interactive confirmation is required.'
+        if [[ "$answer" != n && "$answer" != N && "$answer" != no ]]; then configure=false; fi
+    fi
+    if $configure; then
+        url="${settings[0]}"
+        status 'AzuraCast HTTPS address%s: ' "${url:+ [$url]}"
+        read -r answer || fail 'Enter the AzuraCast address.'
+        url="${answer:-$url}"
+        status 'AzuraCast API key%s: ' "$([[ "${settings[1]}" == 1 ]] && printf ' [Enter keeps existing]')"
+        read -r -s azura_key || fail 'Enter the AzuraCast API key.'
+        status '\n'
+    fi
 fi
 if $configure; then
-    url="${settings[0]}"
-    status 'AzuraCast HTTPS address%s: ' "${url:+ [$url]}"
-    read -r answer || fail 'Enter the AzuraCast address.'
-    url="${answer:-$url}"
     [[ -n "$url" ]] || fail 'Enter the complete AzuraCast HTTPS address.'
-    status 'AzuraCast API key%s: ' "$([[ "${settings[1]}" == 1 ]] && printf ' [Enter keeps existing]')"
-    read -r -s azura_key || fail 'Enter the AzuraCast API key.'
-    status '\nRunpod API key%s: ' "$([[ "${settings[2]}" == 1 ]] && printf ' [Enter keeps existing]')"
-    read -r -s runpod_key || fail 'Enter the Runpod API key.'
-    status '\nPreparing settings...\n'
+    status 'Preparing settings...\n'
     mkdir -p .setup-backups
     backup=$(mktemp -d "$root/.setup-backups/setup.XXXXXX")
     for path in config.toml .env; do
         if [[ -f "$path" ]]; then cp -p "$path" "$backup/$path"; fi
     done
-    printf '%s\0' "$url" "$azura_key" "$runpod_key" | \
+    printf '%s\0' "$url" "$azura_key" "" | \
         docker run --rm --interactive --user 0:0 --network none --entrypoint python \
         -v "$root:/setup" "$image" -m intro_detector.setup_config prepare
-    unset azura_key runpod_key
+    unset azura_key
+else
+    docker run --rm --user 0:0 --network none --entrypoint python \
+        -v "$root:/setup" "$image" -m intro_detector.setup_config token
 fi
 chmod 600 .env
 chown root:10001 config.toml
@@ -108,12 +139,42 @@ fi
 chown 10001:10001 secrets/runpod-ssh-key
 chmod 600 secrets/runpod-ssh-key
 
+web=""
+if [[ -n "$azuracast_dir" ]]; then
+    web=$(docker compose --project-directory "$azuracast_dir" ps -q web)
+    [[ -n "$web" ]] || fail 'AzuraCast is not running; start it before installing the Intro Detector.'
+    network=$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$web" | head -n 1)
+    [[ "$network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || fail 'Could not determine the AzuraCast Docker network.'
+    # The plugin reaches the management API by this alias; no port is published on the host.
+    printf 'services:\n  detector:\n    networks:\n      default: {}\n      azuracast:\n        aliases: [intro-detector]\nnetworks:\n  azuracast:\n    external: true\n    name: %s\n' \
+        "$network" > compose.override.yaml
+    chmod 644 compose.override.yaml
+fi
+
 status 'Checking configuration and API permissions...\n'
 docker compose config --quiet
 docker compose run --rm --no-deps detector check
 status 'Starting/updating the detector...\n'
 docker compose up -d --no-build --no-deps --force-recreate --wait --wait-timeout 90 detector
 docker compose exec -T detector intro-detector status
+if [[ -n "$plugin_dir" ]]; then
+    web_group=$(docker exec "$web" id -g azuracast 2>/dev/null || true)
+    [[ "$web_group" =~ ^[0-9]+$ ]] || web_group=1000
+    docker run --rm --user 0:0 --network none --entrypoint python -v "$root:/setup" -v "$plugin_dir:/plugin" \
+        "$image" -m intro_detector.setup_config link
+    chown "0:$web_group" "$plugin_dir/.detector.json"
+    chmod 640 "$plugin_dir/.detector.json"
+    status 'Connected to the Sweepers plugin: manage it in Sweepers > Intro Detector.\n'
+fi
+# Housekeeping: the replaced service image, older settings backups and build cache beyond 1 GB.
+new_image=$(docker image inspect --format '{{.Id}}' "$image")
+if [[ -n "$old_image" && "$old_image" != "$new_image" ]]; then
+    docker image rm "$old_image" >/dev/null 2>&1 || true
+fi
+find .setup-backups -mindepth 1 -maxdepth 1 -name 'setup.*' -printf '%T@ %p\0' 2>/dev/null | sort -z -rn | tail -z -n +6 | \
+    cut -z -d' ' -f2- | xargs -0 -r rm -rf --
+# Docker limits the build cache only for the whole host; AzuraCast pulls its images and builds nothing.
+docker builder prune --force --max-used-space 1gb >/dev/null 2>&1 || \
+    docker builder prune --force --keep-storage 1gb >/dev/null 2>&1 || true
 status '\nDetector installed/updated. Existing settings and stored analyses are kept.\n'
-status 'First installation uses shadow mode and automatically processes eligible new songs; existing songs are not backfilled.\n'
-status 'Follow First station setup in README.md for a controlled sample scan.\n'
+status 'Stations and Runpod keys are managed in Sweepers > Intro Detector.\n'

@@ -59,10 +59,9 @@ class Publish(unittest.TestCase):
         return publisher.publish(self.con, self.client, station or self.station, 5, 'sha', value,
                                  now=1, force=force)
 
-    def test_shadow_and_off_never_write(self):
-        self.assertEqual(self.publish(10., Station(1, 'shadow')), 'planned')
-        self.assertEqual(self.publish(10., Station(1, 'shadow'), force=True), 'planned')
+    def test_disabled_stations_never_write(self):
         self.assertEqual(self.publish(10., Station(1, 'off')), 'off')
+        self.assertEqual(self.publish(10., Station(1, 'off'), force=True), 'off')
         self.assertEqual(self.client.writes, [])
 
     def test_writes_blank_then_updates_own_value(self):

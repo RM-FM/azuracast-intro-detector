@@ -9,15 +9,57 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from intro_detector.config import Config, Runpod, Station  # noqa: E402
 from intro_detector.db import connect  # noqa: E402
 from intro_detector.evidence import INPUTS  # noqa: E402
+from intro_detector.stations import StationSettings, Stations  # noqa: E402
 
 
 def make_config(root, *stations, **extra):
-    return Config(base_url='https://radio.example', api_key='secret', runpod=Runpod(),
+    return Config(base_url='https://radio.example', api_key='secret', runpod=extra.pop('runpod', Runpod()),
                   stations=stations or (Station(1, 'publish'),), data_dir=Path(root), **extra)
 
 
 def database(root):
     return connect(Path(root) / 'state.sqlite3')
+
+
+def enable(con, cfg, *stations, **settings):
+    """Enable stations in the managed settings with the filters of their Station; mode off disables."""
+    store = Stations(con, cfg, lambda: 0.)
+    for station in stations or cfg.stations:
+        store.save(StationSettings(station.id, enabled=station.mode != 'off',
+                                   min_song_seconds=station.min_song_seconds,
+                                   exclude_playlists=tuple(station.exclude_playlists),
+                                   auto_process=cfg.auto_process, **settings))
+
+
+class FakeWorkers:
+    """One fake GPU for every Runpod key; station keys and blocked stations can be scripted."""
+    keys = {}
+    blocked_stations = {}
+
+    def account(self, station_id):
+        return self.keys.get(station_id, 'runpod-test')
+
+    def get(self, account, eu_only=False):
+        self.accounts = getattr(self, 'accounts', []) + [account]
+        self.eu_only = eu_only
+        return self
+
+    def blocked(self, station_id):
+        if self.account(station_id) is None:
+            return 'no Runpod key'
+        return self.blocked_stations.get(station_id)
+
+    def key_stations(self, account):
+        return 1
+
+    def idle_seconds(self, account):
+        return 600
+
+    def balance(self, account, refresh=False):
+        return None
+
+    def idle_tick(self):
+        return None
 
 
 def report_row(song, sha256, duration=30.):

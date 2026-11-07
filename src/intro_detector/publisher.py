@@ -62,10 +62,7 @@ def publish(con, client, station, media_id, sha256, value, now=None, force=False
         with con:
             _record(con, station.id, media_id, sha256, 'unresolved', last['value'] if last else None, now)
         return 'unresolved'
-    if station.mode == 'shadow':
-        with con:
-            _record(con, station.id, media_id, sha256, 'planned', value, now)
-        return 'planned'
+
     current_raw = (client.get_file(station.id, media_id).get('custom_fields') or {}).get('intro_end')
     current = parse(current_raw)
     ours = last is not None and last['state'] == 'written'

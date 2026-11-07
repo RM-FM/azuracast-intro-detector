@@ -1,11 +1,15 @@
+import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from helpers import Clock, database, tempdir
+from helpers import Clock, database, make_config, tempdir
 from intro_detector.config import Runpod as Settings
-from intro_detector.gpu import GpuError, NoCapacity, Runpod, lane_plan, merge_chunks, month_spend, no_stock, rank
+from intro_detector.gpu import (GpuError, MissingKey, NoCapacity, PodBusy, Runpod, Workers, account_spend, lane_plan,
+                                merge_chunks, month_spend, no_stock, rank, station_spend)
+from intro_detector.stations import Instance, Secrets, Stations, key_account, key_slot, runpod_account
 
 MIXED = (('NVIDIA GeForce RTX 4090', 1.0), ('NVIDIA RTX A5000', .5), ('NVIDIA RTX A4000', .35), ('NVIDIA L40S', .9))
 CATALOG = [{'gpuId': 'NVIDIA GeForce RTX 4090', 'secureCloud': True, 'securePricePerHr': .89, 'memoryInGb': 24,
@@ -30,6 +34,7 @@ class Fake:
     def __init__(self, pods=()):
         self.pods = list(pods)
         self.commands = []
+        self.user_id = 'user-1'
 
     def __call__(self, command, check=True):
         self.commands.append(command)
@@ -43,6 +48,8 @@ class Fake:
         elif command[:3] == ['runpodctl', 'pod', 'create']:
             out = json.dumps({'id': 'newpod1'})
             self.pods = [{'id': 'newpod1', 'name': 'azuracast-intro-detector', 'desiredStatus': 'RUNNING'}]
+        elif command[:2] == ['runpodctl', 'user']:
+            out = json.dumps({'id': self.user_id, 'clientBalance': 12.3456, 'spendLimit': 80})
         elif command[:1] == ['ssh-keygen']:
             out = 'ssh-ed25519 AAAA test'
         elif command[:3] == ['runpodctl', 'pod', 'delete'] or command[:3] == ['runpodctl', 'pod', 'stop']:
@@ -58,6 +65,14 @@ class Ranking(unittest.TestCase):
         order = [(gpu, dc) for gpu, dc, *_ in rank(CATALOG, Settings(gpus=MIXED), songs=100)]
         self.assertEqual(order, [('NVIDIA RTX A5000', 'US-KS-2'), ('NVIDIA GeForce RTX 4090', 'EU-SE-1'),
                                  ('NVIDIA GeForce RTX 4090', 'US-TX-3'), ('NVIDIA GeForce RTX 4090', 'EU-RO-1')])
+
+    def test_eu_only_skips_other_regions_and_european_countries_outside_the_eu(self):
+        catalog = CATALOG + [{'gpuId': 'NVIDIA GeForce RTX 4090', 'secureCloud': True, 'securePricePerHr': .5,
+                              'dataCenterAvailability': [{'dataCenterId': 'EUR-IS-1', 'stockStatus': 'High'}]}]
+        order = [dc for _, dc, *_ in rank(catalog, Settings(eu_only=True), songs=100)]
+        self.assertEqual(order, ['EU-SE-1', 'EU-RO-1'])
+        with self.assertRaisesRegex(NoCapacity, 'in the EU'):
+            rank(CATALOG, Settings(gpus=MIXED[1:2], eu_only=True), songs=1)
 
     def test_minimum_speed_price_cap_and_unlisted_gpus(self):
         order = {gpu for gpu, *_ in rank(CATALOG, Settings(gpus=MIXED, min_speed=.6), songs=100)}
@@ -115,7 +130,11 @@ class Lifecycle(unittest.TestCase):
 
     def test_creates_cheapest_option_without_workspace_volume(self):
         fake = Fake()
-        self.assertEqual(self.runpod(fake, gpus=MIXED).ensure_worker(songs=100), 'newpod1')
+        runpod, steps = self.runpod(fake, gpus=MIXED), []
+        runpod.progress = lambda step, done=0, total=0, **values: steps.append((step, values['detail']))
+        self.assertEqual(runpod.ensure_worker(songs=100), 'newpod1')
+        detail = dict(gpu='NVIDIA RTX A5000', location='US-KS-2', price=.27)
+        self.assertEqual(steps, [('worker', dict(phase='search', **detail)), ('worker', dict(phase='boot', **detail))])
         create = next(c for c in fake.commands if c[:3] == ['runpodctl', 'pod', 'create'])
         self.assertEqual(create[create.index('--gpu-id') + 1], 'NVIDIA RTX A5000')
         self.assertEqual(create[create.index('--container-disk-in-gb') + 1], '80')
@@ -134,10 +153,36 @@ class Lifecycle(unittest.TestCase):
 
     def test_budget_blocks_creation(self):
         with self.con:
-            self.con.execute('INSERT INTO pods(pod_id, price, created_at, ended_at) VALUES(?,?,?,?)',
-                             ('old', 10., self.clock() - 7200, self.clock() - 1))
+            self.con.execute('INSERT INTO pods(pod_id, price, created_at, ended_at, account) VALUES(?,?,?,?,?)',
+                             ('old', 10., self.clock() - 7200, self.clock() - 1, 'default'))
         with self.assertRaises(GpuError):
             self.runpod(Fake(), monthly_budget_usd=5.).ensure_worker()
+
+    def test_eu_only_reuses_eu_workers_and_replaces_others_between_batches(self):
+        for location, reused in (('EU-RO-1', True), ('US-TX-3', False), (None, False)):
+            with self.subTest(location=location):
+                fake = Fake([{'id': 'abc', 'name': 'azuracast-intro-detector', 'desiredStatus': 'RUNNING'}])
+                with self.con:
+                    self.con.execute('DELETE FROM pods')
+                    self.con.execute('INSERT INTO pods(pod_id, price, created_at, copied, location) VALUES(?,?,?,?,?)',
+                                     ('abc', .89, self.clock(), 1, location))
+                self.assertEqual(self.runpod(fake, eu_only=True).ensure_worker(), 'abc' if reused else 'newpod1')
+                self.assertEqual(['runpodctl', 'pod', 'delete', 'abc'] in fake.commands, not reused)
+                if not reused:
+                    create = next(c for c in fake.commands if c[:3] == ['runpodctl', 'pod', 'create'])
+                    self.assertEqual(create[create.index('--data-center-ids') + 1], 'EU-SE-1')
+                    self.assertEqual(self.con.execute("SELECT location FROM pods WHERE pod_id='newpod1'").fetchone()[0],
+                                     'EU-SE-1')
+
+    def test_eu_only_keeps_a_worker_outside_the_eu_with_uncopied_reports(self):
+        fake = Fake([{'id': 'abc', 'name': 'azuracast-intro-detector', 'desiredStatus': 'RUNNING'}])
+        with self.con:
+            self.con.execute('INSERT INTO pods(pod_id, price, created_at, copied, location) VALUES(?,?,?,?,?)',
+                             ('abc', .89, self.clock(), 0, 'US-TX-3'))
+        with self.assertRaises(PodBusy):
+            self.runpod(fake, eu_only=True).ensure_worker()
+        self.assertFalse(any(c[:3] == ['runpodctl', 'pod', 'delete'] for c in fake.commands))
+        self.assertEqual(self.runpod(fake).ensure_worker(), 'abc', 'Songs without EU-only stations use it')
 
     def test_stopped_worker_without_copy_needs_manual_recovery(self):
         fake = Fake([{'id': 'abc', 'name': 'azuracast-intro-detector', 'desiredStatus': 'EXITED'}])
@@ -158,6 +203,182 @@ class Lifecycle(unittest.TestCase):
                 self.clock.now += 601
                 self.assertEqual(runpod.idle_tick(), 'retired')
                 self.assertIn(['runpodctl', 'pod', action, 'abc'], fake.commands)
+
+    def test_deleting_a_stopped_worker_keeps_its_end_time(self):
+        fake = Fake([{'id': 'abc', 'name': 'azuracast-intro-detector', 'desiredStatus': 'EXITED'}])
+        stopped = self.clock() - 4 * 86400
+        with self.con:
+            self.con.execute('INSERT INTO pods(pod_id, price, created_at, ended_at) VALUES(?,?,?,?)',
+                             ('abc', .89, stopped - 3600, stopped))
+        self.runpod(fake).retire('abc', delete=True)
+        self.assertEqual(self.con.execute("SELECT ended_at FROM pods WHERE pod_id='abc'").fetchone()[0], stopped)
+
+
+class LaneStatus(unittest.TestCase):
+    def test_reports_running_stages_and_partial_progress(self):
+        spec = importlib.util.spec_from_file_location('lanes_status', Path(__file__).resolve().parents[1] / 'gpu' / 'lanes_status.py')
+        lanes_status = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lanes_status)
+        with tempdir() as tmp:
+            work, lanes = Path(tmp) / 'work', Path(tmp) / 'lanes'
+            (work / 'results' / '0000').mkdir(parents=True)
+            (work / 'results' / '0000' / 'exit').write_text('lane=0 exit=0')
+            (work / 'total').write_text('3')
+
+            def lane(number, chunk, stages, run_id='r1', state='running'):
+                path = lanes / str(number) / 'experiments' / 'whisper-evidence' / 'ultimate'
+                path.mkdir(parents=True)
+                (path / 'run.json').write_text(json.dumps(dict(
+                    launcher_run_id=f'{run_id}-{chunk}', status=state, total_stages=8,
+                    stages=[dict(stage=name, status=status) for name, status in stages])))
+
+            lane(0, '0000', [('evaluate', 'complete')], state='complete')
+            lane(1, '0001', [('demucs-melband-whisper', 'complete'), ('matrix', 'complete'), ('qwen', 'running')])
+            lane(2, '0002', [('matrix', 'running')], run_id='old')
+            status = lanes_status.summary(str(work), str(lanes), str(work / 'missing.exit'), 'r1')
+        self.assertEqual((status['total'], status['done'], status['failed'], status['exit']), (3, 1, 0, None))
+        self.assertEqual(status['progress'], 1.25, 'A lane two of eight stages into its part adds a quarter')
+        self.assertEqual(status['lanes'], [dict(chunk='0001', finished=2, stages=8, stage='qwen')])
+
+
+class Accounts(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempdir()
+        self.con = database(self.tmp.name)
+        self.clock = Clock(1767312000.)
+        self.cfg = make_config(self.tmp.name)
+        self.stations, self.instance = Stations(self.con, self.cfg, self.clock), Instance(self.con)
+        self.secrets = Secrets(self.tmp.name)
+        self.workers = Workers(self.cfg, self.con, self.stations, self.instance, self.secrets,
+                               call=Fake(), sleep=self.clock.sleep, clock=self.clock)
+
+    def tearDown(self):
+        self.con.close()
+        self.tmp.cleanup()
+
+    def test_stations_with_the_same_key_share_one_worker(self):
+        self.assertIsNone(self.workers.account(4))
+        self.secrets.set(key_slot(4), 'rpa_STATIONKEY1234')
+        self.secrets.set(key_slot(5), 'rpa_STATIONKEY1234')
+        self.secrets.set(key_slot(6), 'rpa_OTHERKEY12345')
+        account, other = self.workers.account(4), self.workers.account(6)
+        self.assertEqual(self.workers.account(5), account)
+        self.assertEqual((account, self.workers.accounts()), (key_account('rpa_STATIONKEY1234'), {account, other}))
+        self.assertEqual((self.workers.key_stations(account), self.workers.key_stations(other)), (2, 1))
+        worker = self.workers.get(account)
+        self.assertEqual((worker.api_key, worker.cfg.monthly_budget_usd), ('rpa_STATIONKEY1234', 0.))
+        self.assertEqual(worker.cfg.worker_name, 'azuracast-intro-detector-' + account[7:15])
+        self.assertNotEqual(worker.lock_path, self.workers.get(other).lock_path)
+        self.assertIs(self.workers.get(account), worker)
+        self.secrets.set(key_slot(4), None)
+        self.secrets.set(key_slot(5), None)
+        with self.assertRaises(MissingKey):
+            self.workers.get(account)
+
+    def test_keys_of_one_runpod_account_share_its_worker(self):
+        self.secrets.set(key_slot(1), 'rpa_FIRSTKEY123456')
+        self.secrets.set(key_slot(2), 'rpa_SECONDKEY12345')
+        old = self.workers.account(1)
+        self.instance.set_marker('worker_names', {old: 'azuracast-intro-detector'})
+        with self.con:
+            self.con.execute('INSERT INTO pods(pod_id, price, created_at, ended_at, account) VALUES(?,?,?,?,?)',
+                             ('p', 1., self.clock() - 60, self.clock(), old))
+        self.assertEqual(len(self.workers.accounts()), 2, 'Keys count separately until Runpod names the account')
+        self.workers.idle_tick()
+        account = runpod_account('user-1')
+        self.assertEqual((self.workers.account(1), self.workers.account(2), self.workers.accounts()),
+                         (account, account, {account}))
+        self.assertEqual(self.workers.key_stations(account), 2)
+        self.assertEqual(self.workers.worker_name(account), 'azuracast-intro-detector', 'The worker keeps its name')
+        self.assertEqual(self.con.execute('SELECT account FROM pods').fetchone()[0], account)
+        self.assertEqual(self.workers.get(account).account, account)
+
+    def test_a_running_worker_keeps_its_account_until_retired(self):
+        self.secrets.set(key_slot(1), 'rpa_FIRSTKEY123456')
+        old = self.workers.account(1)
+        with self.con:
+            self.con.execute('INSERT INTO pods(pod_id, price, created_at, account) VALUES(?,?,?,?)',
+                             ('p', 1., self.clock(), old))
+        self.assertFalse(self.workers.resolve('rpa_FIRSTKEY123456'))
+        self.assertEqual(self.workers.account(1), old)
+        with self.con:
+            self.con.execute('UPDATE pods SET ended_at=?', (self.clock(),))
+        self.workers.resolve_keys()
+        self.assertEqual(self.workers.account(1), old, 'Asked again only after a while')
+        self.clock.now += 600
+        self.workers.resolve_keys()
+        self.assertEqual(self.workers.account(1), runpod_account('user-1'))
+
+    def test_a_shared_worker_waits_for_the_longest_idle_timeout_of_its_stations(self):
+        self.assertEqual(self.workers.idle_seconds('runpod-none'), 600)
+        for station_id, minutes in ((1, 5), (2, 20), (3, 60)):
+            self.secrets.set(key_slot(station_id), 'rpa_SHAREDKEY12345' if station_id < 3 else 'rpa_OTHERKEY123456')
+            self.stations.update(station_id, {'idle_timeout_minutes': minutes})
+        self.assertEqual(self.workers.idle_seconds(self.workers.account(1)), 1200)
+        self.assertEqual(self.workers.get(self.workers.account(1)).cfg.idle_seconds, 1200)
+        self.assertEqual(self.workers.idle_seconds(self.workers.account(3)), 3600)
+
+    def test_eu_only_is_decided_per_batch_not_per_account(self):
+        for station_id in (1, 2):
+            self.secrets.set(key_slot(station_id), 'rpa_SHAREDKEY12345')
+        self.stations.update(2, {'eu_only': True})
+        account = self.workers.account(1)
+        self.assertFalse(self.workers.get(account).cfg.eu_only)
+        self.assertTrue(self.workers.get(account, eu_only=True).cfg.eu_only)
+        with self.assertRaises(ValueError):
+            self.stations.update(1, {'eu_only': 'yes'})
+
+    def test_migrated_workers_keep_their_runpod_name(self):
+        self.secrets.set(key_slot(1), 'rpa_STATIONKEY1234')
+        account = self.workers.account(1)
+        self.instance.set_marker('worker_names', {account: 'azuracast-intro-detector'})
+        self.assertEqual(self.workers.get(account).cfg.worker_name, 'azuracast-intro-detector')
+
+    def test_key_is_passed_only_through_the_environment(self):
+        calls = []
+        worker = Runpod(Settings(), self.con, self.tmp.name, account='runpod-x', api_key='rpa_STATIONKEY1234')
+        with patch('intro_detector.gpu.subprocess.run', side_effect=lambda command, **kw: calls.append((command, kw))
+                   or SimpleNamespace(returncode=0, stdout='[]', stderr='')):
+            worker.worker()
+        command, options = calls[0]
+        self.assertNotIn('rpa_STATIONKEY1234', ' '.join(command))
+        self.assertEqual(options['env']['RUNPOD_API_KEY'], 'rpa_STATIONKEY1234')
+
+    def test_budgets_belong_to_stations(self):
+        self.assertEqual(self.workers.blocked(1), 'no Runpod key')
+        for station_id in (1, 2):
+            self.secrets.set(key_slot(station_id), 'rpa_STATIONKEY1234')
+        self.stations.update(1, {'budget_usd': 2})
+        self.stations.update(2, {'budget_usd': 0})
+        account = self.workers.account(1)
+        with self.con:
+            self.con.execute('INSERT INTO pods(pod_id, price, created_at, ended_at, account) VALUES(?,?,?,?,?)',
+                             ('p', 4., self.clock() - 3600, self.clock(), account))
+            self.con.execute("INSERT INTO runs(id, pod_id, songs, status, started_at) VALUES('r', 'p', 4, 'complete', 0)")
+            self.con.executemany("INSERT INTO run_stations VALUES('r', ?, ?)", [(1, 2), (2, 2)])
+        self.assertEqual(self.workers.blocked(1), 'monthly budget reached')
+        self.assertIsNone(self.workers.blocked(2))
+        self.assertAlmostEqual(account_spend(self.con, account, self.clock()), 4.)
+
+    def test_station_spend_splits_each_pod_by_analyzed_songs(self):
+        with self.con:
+            self.con.execute('INSERT INTO pods(pod_id, price, created_at, ended_at, account) VALUES(?,?,?,?,?)',
+                             ('p', 4., self.clock() - 3600, self.clock(), 'runpod-a'))
+            self.con.execute("INSERT INTO runs(id, pod_id, songs, status, started_at) VALUES('r', 'p', 4, 'complete', 0)")
+            self.con.executemany("INSERT INTO run_stations VALUES('r', ?, ?)", [(1, 3), (2, 1)])
+        self.assertAlmostEqual(station_spend(self.con, 1, self.clock()), 3.)
+        self.assertAlmostEqual(station_spend(self.con, 2, self.clock()), 1.)
+        self.assertEqual(station_spend(self.con, 3, self.clock()), 0.)
+
+    def test_runpod_balance_is_cached(self):
+        self.secrets.set(key_slot(1), 'rpa_STATIONKEY1234')
+        account = self.workers.account(1)
+        self.assertEqual(self.workers.balance(account), {'balance_usd': 12.35, 'checked_at': self.clock()})
+        calls = len(self.workers.call.commands)
+        self.clock.now += 60
+        self.assertEqual(self.workers.balance(account)['checked_at'], self.clock() - 60)
+        self.assertEqual(len(self.workers.call.commands), calls)
+        self.assertEqual(self.workers.balance(account, refresh=True)['checked_at'], self.clock())
 
 
 if __name__ == '__main__':

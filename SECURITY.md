@@ -12,6 +12,8 @@ Keep the detector updated. Pre-releases are experimental; no fixed support perio
 or response-time guarantee is offered. Do not use a pre-release to publish intro
 values without reviewing its results first.
 
-Use a dedicated AzuraCast API user with station View and Media permissions only.
-Store keys in the private `.env` file, never in source code, issue reports or command
-arguments. First installation stays in shadow mode with manual processing.
+Install the detector through the Sweepers plugin: it gets its own AzuraCast user with
+station View and Media permissions on the stations that use it, and nothing is analyzed
+or written until a station switches it on. The AzuraCast key stays in the private `.env`
+file, Runpod keys in the data volume (mode 600); never put keys in source code, issue
+reports or command arguments.

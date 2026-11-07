@@ -40,6 +40,7 @@ def sync_station(con, client, station, now=None):
             # Unknown length (0) counts as short; the file queues once AzuraCast reports it.
             excluded = (PurePosixPath(path).suffix.lower() not in EXTENSIONS
                         or length < station.min_song_seconds
+                        or 0 < station.max_song_seconds < length
                         or bool(set(playlists) & skip))
             fields = dict(unique_id=str(item.get('unique_id') or ''), path=path,
                           mtime=int(item.get('mtime') or 0), length=length,

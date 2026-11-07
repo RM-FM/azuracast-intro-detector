@@ -14,14 +14,11 @@ import re
 import shutil
 import time
 import uuid
-import zlib
 
 from . import evidence
 from .db import pack, unpack
 
 NAME = re.compile(r'[A-Za-z0-9_-]{1,64}')
-# Language that Whisper detected on the Mel-Band stem: the per-song ASR language of B.
-LANGUAGE = re.compile(rb'"melband/whisper_auto":\{.*?"language":(null|"[^"]*")', re.S)
 CHANGED_SECONDS = 0.5
 
 
@@ -33,11 +30,7 @@ def _paths(data_dir, name):
 
 
 def stored_language(blob):
-    data = zlib.decompress(blob)
-    match = LANGUAGE.search(data)
-    if match:
-        return json.loads(match.group(1))
-    return (json.loads(data)['asr'].get('melband/whisper_auto') or {}).get('language')
+    return (unpack(blob)['asr'].get('melband/whisper_auto') or {}).get('language')
 
 
 def _language_index(con, data_dir, live, log):
@@ -136,9 +129,13 @@ def run(service, name, max_usd=None, log=print):
     result = dict(already=len(entries) - len(todo), stored=0, failed={}, changed_audio=[])
     if not todo:
         return result
+    account = next((a for a in map(service.gpus.account, sorted({e['station_id'] for e in todo})) if a), None)
+    if account is None:
+        raise ValueError('None of the set''s stations has a Runpod key')
+    gpu = service.gpus.get(account)
     if max_usd is not None:
-        service.gpu.cfg = cost_limits(service.gpu.cfg, service.gpu.spend(), max_usd)
-        log(f'Cost cap {max_usd:.2f} USD: batch stops after {service.gpu.cfg.max_run_minutes} minutes')
+        gpu.cfg = cost_limits(gpu.cfg, gpu.spend(), max_usd)
+        log(f'Cost cap {max_usd:.2f} USD: batch stops after {gpu.cfg.max_run_minutes} minutes')
     batch = service.cfg.data_dir / 'work' / f'ab-{uuid.uuid4().hex}'
     songs = batch / 'songs'
     try:
@@ -154,7 +151,7 @@ def run(service, name, max_usd=None, log=print):
         if not wanted:
             return result
         log(f'Analyzing {len(wanted)} recordings on the GPU (set {name})')
-        service.gpu.run(songs, batch / 'reports')
+        gpu.run(songs, batch / 'reports')
         report, music = evidence.load_reports(batch / 'reports/report.json', batch / 'reports/music-report.json')
         complete, failed = evidence.split(report, music, wanted)
         with con:

@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import unittest
 
-from helpers import FakeClient, database, make_config, media, music_row, report_row, tempdir, write_reports
+from helpers import FakeClient, FakeWorkers, database, make_config, media, music_row, report_row, tempdir, write_reports
 from intro_detector import ab
 from intro_detector.config import Station
 from intro_detector.db import pack
@@ -24,7 +24,7 @@ class Selector:
                     provenance='development_fit', policy='test')
 
 
-class Gpu:
+class Gpu(FakeWorkers):
     def __init__(self):
         self.batches = []
 
@@ -64,7 +64,7 @@ class AB(unittest.TestCase):
         self.con.close()
         self.tmp.cleanup()
 
-    def test_stored_language_is_read_without_full_parse(self):
+    def test_stored_language_is_read(self):
         blob = self.con.execute('SELECT report FROM analyses WHERE sha256=?', (sha(4),)).fetchone()[0]
         self.assertEqual(ab.stored_language(blob), 'ko')
 

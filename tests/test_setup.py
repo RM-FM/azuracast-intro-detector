@@ -6,9 +6,11 @@ import subprocess
 import tempfile
 import unittest
 
+from dotenv import dotenv_values
+
 import helpers  # noqa: F401
 from intro_detector.config import load
-from intro_detector.setup_config import inspect, prepare, worker_image
+from intro_detector.setup_config import TOKEN, ensure_token, inspect, link, prepare, worker_image
 
 
 class SetupConfiguration(unittest.TestCase):
@@ -22,13 +24,12 @@ class SetupConfiguration(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_first_setup_uses_all_stations_and_shadow_automatic_processing(self):
+    def test_first_setup_uses_all_stations_and_automatic_processing(self):
         prepare(self.root, 'https://radio.example/', 'azura-test', 'runpod-test')
         cfg = load(self.root / 'config.toml', environ={'AZURACAST_API_KEY': 'azura-test'})
         self.assertEqual(cfg.base_url, 'https://radio.example')
         self.assertTrue(cfg.all_stations)
         self.assertTrue(cfg.auto_process)
-        self.assertEqual(cfg.station_defaults.mode, 'shadow')
         self.assertEqual(cfg.runpod.monthly_budget_usd, 50.)
         self.assertEqual((self.root / '.env').stat().st_mode & 0o777, 0o600)
         self.assertNotIn('azura-test', (self.root / 'config.toml').read_text())
@@ -70,6 +71,26 @@ class SetupConfiguration(unittest.TestCase):
     def test_worker_reference_uses_repository_default(self):
         self.assertEqual(worker_image(self.root), ('ghcr.io/rm-fm/azuracast-intro-detector-gpu:v1', False))
 
+    def test_runpod_key_is_optional_and_the_api_token_stays(self):
+        prepare(self.root, 'https://radio.example', 'azura-test')
+        env = dotenv_values(self.root / '.env')
+        self.assertNotIn('RUNPOD_API_KEY', env)
+        self.assertEqual(len(env[TOKEN]), 64)
+        prepare(self.root, 'https://radio.example', '')
+        self.assertFalse(ensure_token(self.root))
+        self.assertEqual(dotenv_values(self.root / '.env')[TOKEN], env[TOKEN])
+
+    def test_token_is_added_to_older_installations(self):
+        (self.root / '.env').write_text('AZURACAST_API_KEY="azura-test"\n')
+        self.assertTrue(ensure_token(self.root))
+        self.assertEqual(dotenv_values(self.root / '.env')['AZURACAST_API_KEY'], 'azura-test')
+
+    def test_plugin_link_holds_address_and_token_only(self):
+        prepare(self.root, 'https://radio.example', 'azura-test', 'runpod-test')
+        link(self.root, self.root / '.detector.json')
+        data = json.loads((self.root / '.detector.json').read_text())
+        self.assertEqual(data, {'url': 'http://intro-detector:8080', 'token': dotenv_values(self.root / '.env')[TOKEN]})
+
 
 @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Bash setup ownership checks require Linux root')
 class BashSetup(unittest.TestCase):
@@ -94,7 +115,19 @@ if 'intro_detector.setup_config' in args:
     from intro_detector.setup_config import main
     action = args[args.index('intro_detector.setup_config') + 1]
     sys.argv = ['setup_config', action, '--root', str(root)]
+    plugin = [a.split(':')[0] for a in args if a.endswith(':/plugin')]
+    if plugin:
+        sys.argv += ['--output', plugin[0] + '/.detector.json']
     main()
+elif args[:2] == ['compose', '--project-directory'] and 'ps' in args:
+    print('' if os.environ.get('NO_WEB') else 'web-container')
+elif args[:1] == ['inspect'] and 'web-container' in args:
+    print('azuracast_default')
+elif args[:2] == ['image', 'inspect']:
+    builds = (root / 'calls.jsonl').read_text().count('"build"')
+    print(f'sha256:build{builds}')
+elif args[:2] == ['exec', 'web-container']:
+    print('1000')
 elif 'ssh-keygen' in args:
     (root / 'secrets/runpod-ssh-key').write_text('test-private-key')
 elif 'manifest' in args and os.environ.get('FAIL_WORKER_IMAGE'):
@@ -109,14 +142,53 @@ elif args[:2] == ['compose', 'run'] and os.environ.get('FAIL_CHECK'):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_setup(self, answers, fail_check=False, fail_worker=False):
-        env = dict(self.env)
+    def run_setup(self, answers, fail_check=False, fail_worker=False, args=(), **extra):
+        env = dict(self.env, **extra)
         if fail_check:
             env['FAIL_CHECK'] = '1'
         if fail_worker:
             env['FAIL_WORKER_IMAGE'] = '1'
-        return subprocess.run(['bash', str(self.root / 'bin/setup.sh')], input=answers,
+        return subprocess.run(['bash', str(self.root / 'bin/setup.sh'), *args], input=answers,
                               text=True, capture_output=True, env=env)
+
+    def azuracast(self):
+        plugin = Path(self.tmp.name) / 'azuracast/plugins/azuracast-sweepers'
+        plugin.mkdir(parents=True)
+        return plugin
+
+    def test_plugin_setup_runs_unattended_and_links_the_plugin(self):
+        plugin = self.azuracast()
+        args = ('--azuracast-dir', str(plugin.parents[1]), '--unattended')
+        result = self.run_setup('https://radio.example\nazura-test-key\n', args=args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('?', result.stdout)
+        self.assertNotIn('azura-test-key', result.stdout + result.stderr + (self.root / 'calls.jsonl').read_text())
+        override = (self.root / 'compose.override.yaml').read_text()
+        self.assertIn('aliases: [intro-detector]', override)
+        self.assertIn('name: azuracast_default', override)
+        link = plugin / '.detector.json'
+        self.assertEqual((link.stat().st_mode & 0o777, link.stat().st_gid), (0o640, 1000))
+        token = dotenv_values(self.root / '.env')[TOKEN]
+        self.assertEqual(json.loads(link.read_text())['token'], token)
+        before = [path.read_bytes() for path in (self.root / 'config.toml', self.root / '.env', link)]
+        result = self.run_setup('', args=args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(before, [path.read_bytes() for path in (self.root / 'config.toml', self.root / '.env', link)])
+
+    def test_plugin_setup_needs_the_plugin_and_running_azuracast(self):
+        args = ('--azuracast-dir', str(Path(self.tmp.name)), '--unattended')
+        result = self.run_setup('https://radio.example\nazura-test-key\n', args=args)
+        self.assertIn('Sweepers plugin first', result.stderr)
+        plugin = self.azuracast()
+        result = self.run_setup('https://radio.example\nazura-test-key\n', NO_WEB='1',
+                                args=('--azuracast-dir', str(plugin.parents[1]), '--unattended'))
+        self.assertIn('AzuraCast is not running', result.stderr)
+        self.assertFalse((plugin / '.detector.json').exists())
+
+    def test_unattended_first_install_requires_the_azuracast_key(self):
+        result = self.run_setup('https://radio.example\n\n', args=('--unattended',))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call[:2] == ['compose', 'up'] for call in self.calls()))
 
     def calls(self):
         return [json.loads(line) for line in (self.root / 'calls.jsonl').read_text().splitlines()]
@@ -142,6 +214,19 @@ elif args[:2] == ['compose', 'run'] and os.environ.get('FAIL_CHECK'):
         result = self.run_setup('\n')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(before, [path.read_bytes() for path in (config, self.root / '.env', self.root / 'secrets/runpod-ssh-key')])
+
+    def test_setup_removes_the_replaced_image_older_backups_and_build_cache(self):
+        backups = self.root / '.setup-backups'
+        for number in range(7):
+            (backups / f'setup.old{number}').mkdir(parents=True)
+            os.utime(backups / f'setup.old{number}', (number, number))
+        result = self.run_setup('https://radio.example\nazura-test-key\nrunpod-test-key\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(['image', 'rm', 'sha256:build0'], self.calls())
+        self.assertTrue(any(call[:2] == ['builder', 'prune'] for call in self.calls()))
+        kept = sorted(path.name for path in backups.iterdir())
+        self.assertEqual(len(kept), 5)
+        self.assertNotIn('setup.old0', kept, 'The oldest backups are removed')
 
     def test_failed_credentials_do_not_restart_service(self):
         result = self.run_setup('https://radio.example\nazura-test-key\nrunpod-test-key\n', fail_check=True)
@@ -195,3 +280,87 @@ elif args[:2] == ['compose', 'run'] and os.environ.get('FAIL_CHECK'):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(config.read_bytes(), before)
         self.assertFalse(any('manifest' in call for call in self.calls()[previous_calls:]))
+
+
+def git(*args, cwd):
+    subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', *args],
+                   cwd=cwd, check=True, capture_output=True)
+
+
+@unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0 and shutil.which('git'),
+                     'Update checks need Linux root and git')
+class UpdateScript(unittest.TestCase):
+    """bin/update.sh against a local origin with two releases and a scripted setup."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        source, self.root = base / 'source', base / 'install'
+        (source / 'bin').mkdir(parents=True)
+        shutil.copyfile(Path(__file__).resolve().parents[1] / 'bin/update.sh', source / 'bin/update.sh')
+        (source / 'bin/setup.sh').write_text(
+            '#!/usr/bin/env bash\n'
+            'echo "$(git -C "$(dirname "$0")/.." describe --tags) $*" >> "$FAKE_ROOT/setup.log"\n'
+            '[[ -z "${FAIL_SETUP:-}" ]]\n')
+        (source / 'release').write_text('0\n')
+        git('init', '-q', '-b', 'main', cwd=source)
+        git('add', '-A', cwd=source)
+        git('commit', '-qm', 'first', cwd=source)
+        git('tag', 'v0.1.0', cwd=source)
+        (source / 'release').write_text('1\n')
+        git('commit', '-qam', 'second', cwd=source)
+        git('tag', 'v1.0.0', cwd=source)
+        git('clone', '-q', str(source), str(self.root), cwd=base)
+        git('checkout', '-q', 'v0.1.0', cwd=self.root)
+        self.azuracast = base / 'azuracast'
+        (self.azuracast / 'plugins/azuracast-sweepers').mkdir(parents=True)
+        fake = base / 'fakebin/docker'
+        fake.parent.mkdir()
+        fake.write_text('#!/usr/bin/env bash\n'
+                        'echo "$*" >> "$FAKE_ROOT/docker.log"\n'
+                        'if [[ "$1 $2" == "compose ps" && -n "${RUNNING:-}" ]]; then echo detector-id; fi\n')
+        fake.chmod(0o755)
+        self.env = dict(os.environ, PATH=f'{fake.parent}{os.pathsep}{os.environ["PATH"]}', FAKE_ROOT=str(base))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def update(self, version='v1.0.0', **extra):
+        return subprocess.run(['bash', str(self.root / 'bin/update.sh'), '--version', version,
+                               '--azuracast-dir', str(self.azuracast)],
+                              text=True, capture_output=True, env=dict(self.env, **extra))
+
+    def head(self):
+        return subprocess.run(['git', 'describe', '--tags'], cwd=self.root, text=True,
+                              capture_output=True).stdout.strip()
+
+    def log(self, name):
+        path = Path(self.tmp.name) / name
+        return path.read_text() if path.exists() else ''
+
+    def test_update_checks_out_the_release_and_runs_setup_unattended(self):
+        result = self.update()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.head(), 'v1.0.0')
+        self.assertIn(f'v1.0.0 --azuracast-dir {self.azuracast} --unattended', self.log('setup.log'))
+        self.assertIn('image tag azuracast-intro-detector:local azuracast-intro-detector:previous', self.log('docker.log'))
+        self.assertIn('image rm azuracast-intro-detector:previous', self.log('docker.log'), 'The rollback copy goes after success')
+
+    def test_failed_setup_restores_the_previous_release(self):
+        result = self.update(FAIL_SETUP='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('previous version was restored', result.stderr)
+        self.assertEqual(self.head(), 'v0.1.0')
+        self.assertIn('image tag azuracast-intro-detector:previous azuracast-intro-detector:local',
+                      self.log('docker.log'))
+
+    def test_unknown_release_and_unchanged_installation(self):
+        self.assertIn('was not found', self.update('v9.9.9').stderr)
+        self.assertIn('was not found', self.update('v1.0.0-rc.1').stderr)
+        self.assertEqual(self.head(), 'v0.1.0')
+        self.update()
+        (self.azuracast / 'plugins/azuracast-sweepers/.detector.json').write_text('{}')
+        result = self.update(RUNNING='1')
+        self.assertIn('already installed', result.stdout)
+        self.assertEqual(self.log('setup.log').count('--unattended'), 1)
+        self.assertNotEqual(self.update('1.0.0').returncode, 0)

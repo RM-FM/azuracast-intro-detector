@@ -1,3 +1,4 @@
+from dataclasses import replace
 import unittest
 
 from helpers import FakeClient, database, media, tempdir
@@ -56,6 +57,13 @@ class Library(unittest.TestCase):
         client.files[3] = media(3, length=180)
         sync_station(self.con, client, self.station, now=20)
         self.assertEqual(self.status(3), 'known')
+
+    def test_long_files_are_excluded_unless_there_is_no_maximum(self):
+        client = FakeClient([media(1, length=900), media(2, length=900.1)])
+        sync_station(self.con, client, self.station, now=10)
+        self.assertEqual([self.status(i) for i in (1, 2)], ['known', 'excluded'])
+        sync_station(self.con, client, replace(self.station, max_song_seconds=0), now=20)
+        self.assertEqual(self.status(2), 'known')
 
     def test_later_uploads_and_replacements_queue(self):
         client = FakeClient([media(1)])

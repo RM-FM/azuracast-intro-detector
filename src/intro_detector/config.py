@@ -19,6 +19,8 @@ class Station:
     mode: str = 'shadow'
     exclude_playlists: tuple = ()
     min_song_seconds: float = 60.0
+    # 0 means no maximum.
+    max_song_seconds: float = 900.0
 
 
 @dataclass(frozen=True)
@@ -68,14 +70,17 @@ class Runpod:
     stagger_seconds: int = 60
     worker_name: str = 'azuracast-intro-detector'
     ssh_key: str = '/secrets/runpod-ssh-key'
+    # Only for a worker none of whose stations holds its key any more; stations set their own idle timeout.
     idle_seconds: int = 600
     wait_minutes: int = 20
     retry_seconds: int = 30
     ssh_minutes: int = 20
     max_run_minutes: int = 240
     poll_seconds: int = 30
-    # Estimated GPU spend per calendar month (UTC); 0 disables the limit.
-    monthly_budget_usd: float = 50.0
+    # Initial monthly GPU budget of a station (estimated spend per UTC month; 0 disables the limit).
+    monthly_budget_usd: float = 10.0
+    # Rent workers only in data centers of EU member states; set per batch from its stations.
+    eu_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -198,8 +203,8 @@ def load(path=None, environ=None):
                      for i in selection or () if i not in listed]
     else:
         raise ValueError('azuracast.stations must be "all" or a list of station IDs')
-    if not all_stations and not stations or len({s.id for s in stations}) != len(stations):
-        raise ValueError('Configure at least one station, each only once')
+    if len({s.id for s in stations}) != len(stations):
+        raise ValueError('Configure each station only once')
     pod = dict(raw.get('runpod', {}))
     if 'gpus' in pod:
         if not isinstance(pod['gpus'], dict) or not pod['gpus']:
