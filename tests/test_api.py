@@ -79,6 +79,15 @@ class ApiTests(unittest.TestCase):
         con.close()
         body = self.call('GET', '/api/v1/stations/4')[1]
         self.assertEqual((body['spend_month_usd'], body['key']['spend_month_usd']), (.5, 2.))
+        self.assertIsNone(body['worker'])
+        con = database(self.tmp.name)
+        with con:
+            con.execute('INSERT INTO pods(pod_id, gpu_id, price, created_at, idle_since, account) VALUES(?,?,?,?,?,?)',
+                        ('q', 'NVIDIA GeForce RTX 4090', .89, self.clock() - 300, self.clock() - 60, ACCOUNT))
+        con.close()
+        worker = self.call('GET', '/api/v1/stations/4')[1]['worker']
+        self.assertEqual((worker['gpu_id'], worker['shutdown_at']), ('NVIDIA GeForce RTX 4090', self.clock() + 540),
+                         'An idle worker shuts down ten minutes after its last batch')
         self.assertEqual(body['library_estimate_usd'], 0., 'Estimates use the cost per song so far')
         self.assertIsNone(self.call('GET', '/api/v1/stations/5')[1]['key'])
 

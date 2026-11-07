@@ -36,12 +36,16 @@ def estimate(con, songs):
     return None if per_thousand is None else round(songs * per_thousand / 1000, 2)
 
 
-def worker(con, account):
+def worker(con, account, idle_seconds=None):
+    """The account's running worker; shutdown_at is when an idle worker is retired, None while it works."""
     if account is None:
         return None
     row = con.execute('SELECT pod_id, gpu_id, price, created_at, idle_since, copied FROM pods '
                       'WHERE account=? AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1', (account,)).fetchone()
-    return dict(row) if row else None
+    if row is None:
+        return None
+    shutdown = row['idle_since'] + idle_seconds if row['idle_since'] is not None and idle_seconds else None
+    return dict(row, shutdown_at=shutdown)
 
 
 def key_summary(service, account, now):
@@ -89,7 +93,7 @@ def station(service, station_id):
         key=None if account is None else key_summary(service, account, now),
         spend_month_usd=round(station_spend(con, station_id, now), 4),
         limit_usd=settings.budget_usd,
-        worker=worker(con, account),
+        worker=worker(con, account, service.cfg.runpod.idle_seconds),
         recovery=service.recovery(account) if account else None,
         activity=activity(service, station_id),
         now=now,
