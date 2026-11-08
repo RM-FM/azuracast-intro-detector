@@ -137,18 +137,37 @@ class ApiTests(unittest.TestCase):
                          'A song with a written intro counts as analyzed also after its file changed')
     def test_retiring_unconfirmed_workers_needs_force(self):
         self.assertEqual(self.call('POST', '/api/v1/stations/3/worker/retire')[0], 409)
+        self.call('PUT', '/api/v1/stations/3', {'enabled': True})
         self.call('PUT', '/api/v1/stations/3/key', {'key': KEY})
         self.assertEqual(self.call('POST', '/api/v1/stations/3/worker/retire')[1], {'worker': None})
         name = 'azuracast-intro-detector-' + ACCOUNT[7:15]
         self.fake.pods = [{'id': 'abc', 'name': name, 'desiredStatus': 'EXITED'}]
         service = self.open()
         service.instance.set_marker(f'recovery:{ACCOUNT}', 'stopped with unconfirmed evidence')
+        service.instance.set_marker(f'retry_at:{ACCOUNT}', self.clock() + 900)
         service.con.close()
         self.assertEqual(self.call('GET', '/api/v1/stations/3')[1]['recovery'], 'stopped with unconfirmed evidence')
+        self.assertEqual(self.call('POST', '/api/v1/stations/3/worker/retire', {'delete': False})[0], 200)
+        self.assertEqual(self.call('GET', '/api/v1/stations/3')[1]['blocked'], 'waiting for GPU retry')
+        self.fake.pods = [{'id': 'abc', 'name': name, 'desiredStatus': 'EXITED'}]
         self.assertEqual(self.call('POST', '/api/v1/stations/3/worker/retire')[0], 409)
+        self.assertEqual(self.call('GET', '/api/v1/stations/3')[1]['blocked'], 'waiting for GPU retry')
         code, body = self.call('POST', '/api/v1/stations/3/worker/retire', {'force': True})
         self.assertEqual((code, body), (200, {'worker': 'abc', 'action': 'deleted'}))
         self.assertIsNone(self.call('GET', '/api/v1/stations/3')[1]['recovery'])
+        self.assertIsNone(self.call('GET', '/api/v1/stations/3')[1]['blocked'])
+
+    def test_retire_missing_worker_clears_recovery_retry(self):
+        self.call('PUT', '/api/v1/stations/3', {'enabled': True})
+        self.call('PUT', '/api/v1/stations/3/key', {'key': KEY})
+        service = self.open()
+        service.instance.set_marker(f'recovery:{ACCOUNT}', 'stopped')
+        service.instance.set_marker(f'retry_at:{ACCOUNT}', self.clock() + 900)
+        service.con.close()
+        self.assertEqual(self.call('POST', '/api/v1/stations/3/worker/retire')[1], {'worker': None})
+        body = self.call('GET', '/api/v1/stations/3')[1]
+        self.assertIsNone(body['recovery'])
+        self.assertIsNone(body['blocked'])
 
     def test_http_server_round_trip(self):
         server = serve(self.api, host='127.0.0.1', port=0)

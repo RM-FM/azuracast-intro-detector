@@ -309,6 +309,15 @@ class Accounts(unittest.TestCase):
         self.workers.resolve_keys()
         self.assertEqual(self.workers.account(1), runpod_account('user-1'))
 
+    def test_account_resolution_preserves_the_later_retry_deadline(self):
+        key = 'rpa_FIRSTKEY123456'
+        old, account = key_account(key), runpod_account('user-1')
+        self.instance.set_marker(f'retry_at:{old}', self.clock() + 300)
+        self.instance.set_marker(f'retry_at:{account}', self.clock() + 600)
+        self.assertTrue(self.workers.resolve(key))
+        self.assertIsNone(self.instance.marker(f'retry_at:{old}'))
+        self.assertEqual(self.instance.marker(f'retry_at:{account}'), self.clock() + 600)
+
     def test_a_shared_worker_waits_for_the_longest_idle_timeout_of_its_stations(self):
         self.assertEqual(self.workers.idle_seconds('runpod-none'), 600)
         for station_id, minutes in ((1, 5), (2, 20), (3, 60)):

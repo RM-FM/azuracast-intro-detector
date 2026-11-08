@@ -464,6 +464,8 @@ Do not delete a worker containing reports that have not been recovered.
 - **Station blocked:** the Intro Detector page names the reason: no key, budget
   reached, a failed batch waiting for its retry, a stopped worker that needs a
   decision, or less than 500 MB of free disk space.
+  Requested processing remains queued while songs are blocked. Deleting a worker
+  that needs recovery clears its retry delay so its songs can start again.
 - **No scans:** initial sync does not backfill. Check the pending queue, filters and
   the station's automatic processing; manual stations need "Process now".
 - **No GPU capacity:** check allowed GPU types, speed and hourly price cap. Do not
