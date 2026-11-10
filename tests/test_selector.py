@@ -39,7 +39,7 @@ class FrozenSelector(unittest.TestCase):
     def test_packaged_training_matches_vendored_policy(self):
         from intro_detector.selector import POLICY, Selector
         selector = Selector()
-        self.assertEqual(POLICY, 'intro-selector-extratrees-three-inputs-v2+lead-vocal-guard-v3')
+        self.assertEqual(POLICY, 'intro-selector-extratrees-three-inputs-v2+lead-vocal-guard-v3+opening-phrase-v1')
         self.assertEqual(selector.training_songs, 39)
 
     def test_lead_word_after_vocalization_guards_late_model_cue(self):
@@ -101,6 +101,66 @@ class FrozenSelector(unittest.TestCase):
 
         self.assertAlmostEqual(anchor, 7.)
         self.assertEqual(support, 2)
+
+    def test_shared_opening_phrase_overrides_late_cue_despite_weak_vocal_curves(self):
+        from intro_detector.selector import Selector
+
+        row = helpers.report_row('song.mp3', 'sha')
+        row['acoustic'] = {}
+        words = [dict(word=word, start_original=start) for word, start in
+                 ((' Shout', 0.), (' through', .34), (' the', .56), (' heart', .78))]
+        for variant, flags in (('original', ['invalid_word_timing']), ('melband', [])):
+            row['asr'][f'{variant}/turbo'] = dict(
+                text='Shout through the heart', words=words, first_word_start=0., quality_flags=flags)
+        row['candidates'] = [dict(chain='original/panns-4s/0.1/level', cue_s=2.92)]
+
+        selector = Selector()
+
+        class LateModel:
+            _np = selector._np
+
+            def predict(self, features):
+                return self._np.array([1. if abs(feature[0] - 2.92) < .01 else .1 for feature in features])
+
+        selector.model = LateModel()
+        result = selector.predict(row)
+
+        self.assertEqual(result['opening_phrase_s'], 0.)
+        self.assertEqual(result['decision_s'], 0.)
+        self.assertFalse(result['conflict'])
+
+    def test_opening_phrase_needs_two_inputs_with_the_same_words(self):
+        from intro_detector.selector import _opening_phrase_start
+
+        row = helpers.report_row('song.mp3', 'sha')
+        row['asr']['original/turbo'] = dict(
+            text='Gib mir die Hand', first_word_start=.3, quality_flags=[],
+            words=[dict(word=w, start_original=s) for w, s in ((' Gib', .3), (' mir', .6), (' die', .9))])
+        self.assertIsNone(_opening_phrase_start(row))
+        row['asr']['demucs/turbo'] = dict(
+            text='Ich bin da', first_word_start=.2, quality_flags=[],
+            words=[dict(word=w, start_original=s) for w, s in ((' Ich', .2), (' bin', .5), (' da', .8))])
+        self.assertIsNone(_opening_phrase_start(row))
+        row['asr']['melband/qwen'] = dict(
+            text='Gib mir die Hand', first_word_start=.32, quality_flags=['invalid_word_timing'],
+            words=[dict(word=w, start_original=s) for w, s in ((' Gib', .32), (' mir', .64), (' die', .96))])
+        self.assertAlmostEqual(_opening_phrase_start(row), .3)
+
+    def test_adlibs_hallucinations_and_late_words_are_not_an_opening_phrase(self):
+        from intro_detector.selector import _opening_phrase_start
+
+        row = helpers.report_row('song.mp3', 'sha')
+        for variant in ('original', 'demucs'):
+            row['asr'][f'{variant}/turbo'] = dict(
+                text='ooh ooh na', first_word_start=0., quality_flags=[],
+                words=[dict(word=w, start_original=s) for w, s in ((' ooh', 0.), (' ooh', .4), (' na', .8))])
+            row['asr'][f'{variant}/qwen'] = dict(
+                text='Thank you for watching', first_word_start=0., quality_flags=[],
+                words=[dict(word=w, start_original=s) for w, s in ((' Thank', 0.), (' you', .3), (' for', .6))])
+            row['asr'][f'{variant}/whisper_auto'] = dict(
+                text='Uptown girl she', first_word_start=1.6, quality_flags=[],
+                words=[dict(word=w, start_original=s) for w, s in ((' Uptown', 1.6), (' girl', 1.9), (' she', 2.2))])
+        self.assertIsNone(_opening_phrase_start(row))
 
     def test_invalid_word_alignment_does_not_create_lead_anchor(self):
         from intro_detector.selector import _lead_word_events
@@ -232,6 +292,12 @@ class FrozenSelector(unittest.TestCase):
 
         row['smad']['probabilities'] = [[.51, .49]]
         self.assertFalse(_early_vocal_support(compact(row), row))
+        result = selector.predict(row)
+        self.assertEqual(result['decision_s'], 0.)
+        self.assertEqual(result['opening_phrase_s'], 0.)
+
+        for model in ('turbo', 'whisper_auto'):
+            row['asr'][f'demucs/{model}'] = dict(text='', words=[], first_word_start=None, quality_flags=[])
         result = selector.predict(row)
         self.assertEqual(result['decision_s'], 9.2)
 
