@@ -10,7 +10,7 @@ from .core import selector_model as core
 from .evidence import INPUTS, compact
 
 TRAINING_POLICY = core.POLICY
-POLICY = f'{TRAINING_POLICY}+lead-vocal-guard-v3'
+POLICY = f'{TRAINING_POLICY}+lead-vocal-guard-v3+opening-phrase-v1'
 TRAINING_SCHEMA = 1
 BAD_TIMING_FLAGS = {'invalid_word_timing', 'nonmonotonic_word_timing',
                     'text_without_alignment', 'alignment_failed'}
@@ -76,10 +76,14 @@ class Selector:
                 early_vocal_s = _early_vocal_onset(bursts, self.vocals)
                 cue = cue if early_vocal_s is None else early_vocal_s
         conflict = conflict or (report_row is not None and cue < 1.0 and not early_vocals)
+        opening = _opening_phrase_start(report_row, self.vocals.adlib_words)
+        if opening is not None:
+            cue, conflict = opening, False
         return dict(cue_s=cue, decision_s=None if conflict else cue, conflict=conflict,
                     rank_score=round(float(scores[index]), 4), provenance='development_fit', policy=POLICY,
                     lead_anchor_s=lead_anchor, lead_anchor_support=support,
-                    lead_guard_applied=guarded and bool(eligible), early_vocal_s=early_vocal_s)
+                    lead_guard_applied=guarded and bool(eligible), early_vocal_s=early_vocal_s,
+                    opening_phrase_s=opening)
 
 
 def _lead_word_events(report_row, adlib_words=DEFAULT_VOCALS.adlib_words):
@@ -105,6 +109,39 @@ def _lead_word_events(report_row, adlib_words=DEFAULT_VOCALS.adlib_words):
                 and math.isfinite(start) and 0 <= start < report_row.get('duration', 0)):
             events.append((float(start), source.split('/', 1)[0]))
     return events
+
+
+def _opening_words(result, adlib_words):
+    """Tokens of the first three words when they open the song; flags on later words do not matter."""
+    text = ' '.join(re.findall(r'[^\W_]+', str(result.get('text') or '').casefold()))
+    if 'compression_ratio' in (result.get('quality_flags') or []) or any(phrase in text for phrase in core.bad):
+        return None
+    words = []
+    for word in result.get('words') or []:
+        start = word.get('start_original', word.get('start'))
+        tokens = re.findall(r'[^\W_]+', str(word.get('word') or '').casefold())
+        if _number(start) and tokens:
+            words.append((float(start), tokens))
+        if len(words) == 3:
+            break
+    if (len(words) < 3 or not 0 <= words[0][0] < 1 or words[2][0] > 4
+            or any(later[0] < earlier[0] for earlier, later in zip(words, words[1:]))):
+        return None
+    tokens = [token for _, group in words for token in group]
+    return None if all(token in adlib_words for token in tokens) else (words[0][0], set(tokens))
+
+
+def _opening_phrase_start(report_row, adlib_words=DEFAULT_VOCALS.adlib_words):
+    """Vocal start when two inputs transcribe the same phrase from the first second, else None."""
+    openings = {}
+    for source, result in (report_row or {}).get('asr', {}).items():
+        variant = source.split('/', 1)[0]
+        opening = _opening_words(result, adlib_words) if variant in INPUTS else None
+        if opening:
+            openings.setdefault(variant, []).append(opening)
+    agreeing = {variant for variant, own in openings.items() for other, theirs in openings.items()
+                if other != variant and any(len(a[1] & b[1]) >= 2 for a in own for b in theirs)}
+    return min(start for variant in agreeing for start, _ in openings[variant]) if agreeing else None
 
 
 def _unreliable_lead_asr(result):
