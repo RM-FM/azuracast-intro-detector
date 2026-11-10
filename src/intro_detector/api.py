@@ -174,14 +174,14 @@ class Api:
         gpu = service.gpus.get(account)
         pod = gpu.worker()
         if pod is None:
-            service.instance.set_marker(f'recovery:{account}', None)
+            service.clear_recovery(account)
             return dict(worker=None)
         row = gpu._row(pod['id'])
         if delete and not (row and row['copied']) and not force:
             raise ApiError(409, 'Reports of this worker were not copied; deleting it loses them')
         gpu.retire(pod['id'], delete=delete)
         if delete:
-            service.instance.set_marker(f'recovery:{account}', None)
+            service.clear_recovery(account)
         return dict(worker=pod['id'], action='deleted' if delete else 'stopped')
 
 

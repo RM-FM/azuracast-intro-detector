@@ -31,8 +31,6 @@ class Service:
         self.instance = Instance(con)
         self.housekeeping = Housekeeping(con, cfg.data_dir, self.instance, clock)
         self._selector, self._selector_factory = None, selector_factory
-        # Per GPU account: no batch before this time after a failed one.
-        self.retry_at = {}
 
     @property
     def selector(self):
@@ -200,6 +198,10 @@ class Service:
         """Message of a stopped worker that waits for an operator decision, or None."""
         return self.instance.marker(f'recovery:{account}')
 
+    def clear_recovery(self, account):
+        self.instance.set_marker(f'recovery:{account}', None)
+        self.instance.set_marker(f'retry_at:{account}', None)
+
     def reusable(self, sha256):
         """An identical file was analyzed before, for any station."""
         return self.con.execute('SELECT 1 FROM analyses WHERE sha256=?', (sha256,)).fetchone() is not None
@@ -209,7 +211,8 @@ class Service:
         if disk_full(self.cfg.data_dir):
             return 'disk almost full'
         blocked = self.gpus.blocked(settings.id)
-        if blocked is None and self.clock() < self.retry_at.get(self.gpus.account(settings.id), 0.):
+        retry_at = self.instance.marker(f'retry_at:{self.gpus.account(settings.id)}')
+        if blocked is None and retry_at is not None and self.clock() < retry_at:
             return 'waiting for GPU retry'
         return blocked
 
@@ -331,7 +334,7 @@ class Service:
                                  ('failed', str(error)[:2000], self.clock(),
                                   getattr(worker, 'last_pod_id', None), (self.activity() or {}).get('step'), run_id))
             log.error('GPU batch %s (%s) failed: %s', run_id, account, error)
-            self.retry_at[account] = self.clock() + RETRY_SECONDS
+            self.instance.set_marker(f'retry_at:{account}', self.clock() + RETRY_SECONDS)
             if isinstance(error, WorkerNeedsRecovery):
                 self.instance.set_marker(f'recovery:{account}', str(error))
             # Capacity, budget, a busy worker or a failed copy are not the songs' fault.
@@ -342,7 +345,7 @@ class Service:
                     self._failed(media, f'GPU batch: {error}')
             return
         complete, failed = evidence.split(report, music, set(waiting))
-        self.instance.set_marker(f'recovery:{account}', None)
+        self.clear_recovery(account)
         with self.con:
             for sha256, (row, tune) in complete.items():
                 self.con.execute('INSERT OR REPLACE INTO analyses(sha256, source, run_id, report, music, created_at) '
@@ -364,11 +367,12 @@ class Service:
                 self._progress('save', saved, total)
 
     def tick(self):
-        """One queue step; a station's request ends once none of its songs can make progress."""
+        """One queue step; retain requests while eligible songs are pending."""
         result = self.process()
         stations, forced, requests = self._eligible()
-        done = [i for i in requests
-                if i not in stations or next(self._candidates({i: stations[i]}, [i] if i in forced else []), None) is None]
+        done = [i for i in requests if i not in stations or not self.con.execute(
+            "SELECT 1 FROM media WHERE station_id=? AND status='pending' AND (intro_end IS NULL OR ?) LIMIT 1",
+            (i, i in forced)).fetchone()]
         if done:
             with self.con:
                 self.con.executemany('DELETE FROM process_requests WHERE station_id=?', [(i,) for i in done])

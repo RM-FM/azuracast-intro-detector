@@ -192,6 +192,61 @@ class Processing(QueueCase):
         service.process()
         self.assertEqual(len(gpu.batches), 2)
 
+    def test_retry_is_shared_and_requested_processing_waits_for_it(self):
+        self.configure(batch_quiet_seconds=60, auto_process=False)
+        gpu = FakeGpu(error=NoCapacity('none'))
+        service = self.service(gpu, {sha(2): 5.})
+        self.upload(2)
+        service.request(1)
+        service.tick()
+        other_con = database(self.tmp.name)
+        try:
+            other = Service(self.cfg, other_con, self.client, gpu, clock=self.clock)
+            self.assertEqual(other.blocked(other.settings.get(1)), 'waiting for GPU retry')
+        finally:
+            other_con.close()
+        self.assertEqual(service.requests(), {1: False})
+        self.assertEqual(service.tick(), 'idle')
+        self.assertEqual(service.requests(), {1: False})
+        self.clock.now += 901
+        gpu.error = None
+        service.tick()
+        self.assertEqual(self.status(1, 2)[0], 'done')
+        self.assertEqual(service.requests(), {})
+
+    def test_request_waits_for_a_key_after_downloading(self):
+        self.configure(batch_quiet_seconds=0, auto_process=False)
+        gpu = FakeGpu(keys={1: None})
+        service = self.service(gpu, {sha(2): 5.})
+        self.upload(2)
+        service.request(1)
+        service.tick()
+        self.assertEqual(self.status(1, 2), ('pending', 0, sha(2)))
+        self.assertEqual(service.requests(), {1: False})
+        gpu.keys[1] = 'runpod-test'
+        service.tick()
+        self.assertEqual(self.status(1, 2)[0], 'done')
+        self.assertEqual(service.requests(), {})
+
+    def test_clearing_recovery_resumes_a_requested_batch_without_waiting(self):
+        self.configure(batch_quiet_seconds=0, auto_process=False)
+        gpu = FakeGpu(error=WorkerNeedsRecovery('stopped'))
+        service = self.service(gpu, {sha(2): 5.})
+        self.upload(2)
+        service.request(1)
+        service.tick()
+        self.assertEqual(service.requests(), {1: False})
+        self.assertEqual(service.recovery('runpod-test'), 'stopped')
+        other_con = database(self.tmp.name)
+        try:
+            Service(self.cfg, other_con, self.client, gpu, clock=self.clock).clear_recovery('runpod-test')
+        finally:
+            other_con.close()
+        gpu.error = None
+        service.tick()
+        self.assertEqual(self.status(1, 2)[0], 'done')
+        self.assertEqual(service.requests(), {})
+
     def test_batch_failure_counts_attempt(self):
         service = self.service(FakeGpu(error=GpuError('exit 1')), {})
         self.upload(2)

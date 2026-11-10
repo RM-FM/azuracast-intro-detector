@@ -546,6 +546,11 @@ class Workers:
             if value is not None:
                 self.instance.set_marker(f'{name}:{account}', value)
                 self.instance.set_marker(f'{name}:{old}', None)
+        retry_at = self.instance.marker(f'retry_at:{old}')
+        if retry_at is not None:
+            current = self.instance.marker(f'retry_at:{account}')
+            self.instance.set_marker(f'retry_at:{account}', max(retry_at, current or 0))
+            self.instance.set_marker(f'retry_at:{old}', None)
         with self.con:
             for table in ('pods', 'runs'):
                 self.con.execute(f'UPDATE {table} SET account=? WHERE account=?', (account, old))
